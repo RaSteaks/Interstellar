@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#08090d" />
+    <title>Interstellar · 黑洞观测站</title>
+    <meta name="description" content="穿过光的边界。探索实时粒子吸积盘，调整视角、旋转速度与粒子密度，观察黑洞周围的光与运动。" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308090d'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23efb77b' stroke-width='2'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='4' fill='none' stroke='%23efb77b' stroke-width='2' transform='rotate(-20 16 16)'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#controls">跳到观测参数</a>
+    <header class="header">
+      <a class="brand" href="#observatory" aria-label="Interstellar 黑洞观测站首页">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="8"/><ellipse cx="16" cy="16" rx="15" ry="4" transform="rotate(-25 16 16)"/></svg>
+        <span>INTERSTELLAR<small>黑洞观测站</small></span>
+      </a>
+      <nav aria-label="主导航">
+        <a class="current" href="#observatory">观测台</a>
+        <a href="#phenomena">认识黑洞</a>
+        <a href="#references">项目参考 <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M6 4H4v10h10v-2M9 4h5v5M8 10l6-6"/></svg></a>
+      </nav>
+      <span class="header-note">A WINDOW INTO THE UNKNOWN</span>
+    </header>
+
+    <main>
+      <section class="observatory" id="observatory" aria-labelledby="hero-title">
+        <div class="scene" id="scene">
+          <canvas id="cosmos" aria-label="黑洞粒子可视化：发光的粒子围绕暗色黑洞旋转。可使用下方参数调整画面。" tabindex="0"></canvas>
+          <div class="scene-vignette" aria-hidden="true"></div>
+          <div class="intro">
+            <p class="eyebrow"><span></span> BEYOND THE EVENT HORIZON</p>
+            <h1 id="hero-title">视界之外<span>光的尽头，宇宙的深处。</span></h1>
+            <p class="intro-text">在光无法逃离的边界，<br />看见引力描绘的宇宙。</p>
+          </div>
+          <div class="scene-coordinate"><span>PARTICLE ACCRETION DISK</span><span>科学启发 · 艺术可视化</span></div>
+          <div class="canvas-help"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="2" width="10" height="16" rx="5"/><path d="M10 5v3"/></svg><span>拖动旋转 · 参数调节视距</span></div>
+          <div class="scene-tools" role="group" aria-label="画面操作">
+            <button id="pause" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="pause-icon" d="M7 4v12M13 4v12"/></svg><span id="pause-label">暂停</span></button>
+            <button id="reset" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 6a7 7 0 1 1-1 7M3 3v5h5"/></svg>重置</button>
+            <button id="fullscreen" type="button"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4M13 3h4v4M17 13v4h-4M7 17H3v-4"/></svg><span id="fullscreen-label">沉浸模式</span></button>
+          </div>
+          <div class="scene-line" aria-hidden="true"><i></i><span>EVENT HORIZON</span></div>
+        </div>
+
+        <aside class="controls" id="controls" aria-labelledby="controls-title">
+          <div class="panel-heading"><div><p class="eyebrow">OBSERVATION</p><h2 id="controls-title">观测参数</h2></div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg></div>
+          <div class="presets" role="group" aria-label="视角预设"><button type="button" data-preset="cinema" aria-pressed="true">电影视角</button><button type="button" data-preset="top" aria-pressed="false">俯瞰视角</button></div>
+          <div class="parameter"><div><label for="tilt">观测倾角</label><output id="tilt-value" for="tilt">18°</output></div><input id="tilt" type="range" min="8" max="85" value="18" step="1" /><div class="range-hints"><span>侧面</span><span>俯瞰</span></div></div>
+          <div class="parameter"><div><label for="speed">旋转速度</label><output id="speed-value" for="speed">1.0 ×</output></div><input id="speed" type="range" min="0.1" max="3" value="1" step="0.1" /></div>
+          <div class="parameter"><div><label for="density">粒子密度</label><output id="density-value" for="density">24,000</output></div><input id="density" type="range" min="4000" max="40000" value="24000" step="2000" /></div>
+          <div class="parameter"><div><label for="zoom">观测距离</label><output id="zoom-value" for="zoom">1.0 ×</output></div><input id="zoom" type="range" min="0.65" max="1.4" value="1" step="0.05" /></div>
+          <div class="palette-control"><span>光谱配色</span><div role="group" aria-label="光谱配色"><button type="button" data-palette="amber" aria-pressed="true"><i class="amber"></i>琥珀</button><button type="button" data-palette="ice" aria-pressed="false"><i class="ice"></i>冰蓝</button></div></div>
+          <div class="panel-footer"><span class="render-state" id="render-state">实时粒子场</span><span class="mono" id="particle-count">24,000 PT</span></div>
+          <p class="status" id="status" role="status" aria-live="polite"></p>
+        </aside>
+        <a class="discover" href="#phenomena"><span>继续探索</span><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7 5 5 5-5"/></svg></a>
+      </section>
+
+      <section class="phenomena content-section" id="phenomena" aria-labelledby="phenomena-title">
+        <div class="section-title"><p class="eyebrow">THE ANATOMY OF A BLACK HOLE</p><h2 id="phenomena-title">黑暗，也有轮廓。</h2><p>你看见的并非黑洞本身，而是它周围的物质与光。</p></div>
+        <div class="phenomena-grid">
+          <article><div class="diagram horizon-diagram" aria-hidden="true"><svg viewBox="0 0 140 80"><circle cx="70" cy="40" r="24"/><path d="M9 40h29M102 40h29"/><circle cx="70" cy="40" r="29" stroke-dasharray="2 5"/></svg></div><p class="eyebrow">EVENT HORIZON</p><h3>事件视界</h3><p>一个无法回头的边界。一旦越过它，即使是光，也无法再向外逃逸。</p></article>
+          <article><div class="diagram" aria-hidden="true"><svg viewBox="0 0 140 80"><ellipse cx="70" cy="40" rx="51" ry="15" transform="rotate(-15 70 40)"/><ellipse cx="70" cy="40" rx="41" ry="11" transform="rotate(-15 70 40)"/><circle cx="70" cy="40" r="12" fill="var(--bg)"/></svg></div><p class="eyebrow">ACCRETION DISK</p><h3>吸积盘</h3><p>围绕黑洞旋转的气体形成明亮圆盘。这里用差速运动的粒子，呈现物质的旋转与流动。</p></article>
+          <article><div class="diagram" aria-hidden="true"><svg viewBox="0 0 140 80"><circle cx="70" cy="40" r="14"/><path d="M6 20c32 0 38 48 64 48s32-48 64-48M6 60c32 0 38-48 64-48s32 48 64 48"/></svg></div><p class="eyebrow">GRAVITATIONAL LENSING</p><h3>引力透镜</h3><p>强引力改变光的路径。本画面以近似的弯曲光环，表现吸积盘在黑洞背后的视觉变形。</p></article>
+        </div>
+        <p class="science-note">这是一幅科学启发的交互作品。粒子运动、透镜与光谱经过视觉化简，不代表对真实黑洞的精确物理计算。</p>
+      </section>
+
+      <section class="references content-section" id="references" aria-labelledby="references-title">
+        <div class="reference-intro"><p class="eyebrow">BUILT ON CURIOSITY</p><h2 id="references-title">从开源宇宙获得灵感。</h2><p>我们查看了这些 GitHub 项目，借鉴粒子表现与黑洞可视化思路，独立实现这座观测站。</p></div>
+        <div class="reference-list">
+          <a href="https://github.com/Scenes3D/black-hole" target="_blank" rel="noopener noreferrer"><div><span class="repo-owner">Scenes3D /</span><h3>black-hole</h3><p>粒子吸积盘、星场与多阶段透镜合成</p></div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H5v14h14v-4M13 5h6v6M10 14l9-9"/></svg></a>
+          <a href="https://github.com/oseiskar/black-hole" target="_blank" rel="noopener noreferrer"><div><span class="repo-owner">oseiskar /</span><h3>black-hole</h3><p>Schwarzschild 黑洞的 WebGL 可视化</p></div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H5v14h14v-4M13 5h6v6M10 14l9-9"/></svg></a>
+          <a href="https://github.com/Niiflheim01/singularity" target="_blank" rel="noopener noreferrer"><div><span class="repo-owner">Niiflheim01 /</span><h3>singularity</h3><p>差速粒子轨道与多普勒色彩表现</p></div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5H5v14h14v-4M13 5h6v6M10 14l9-9"/></svg></a>
+        </div>
+      </section>
+    </main>
+    <footer class="footer"><span class="brand-word">INTERSTELLAR</span><span>保持好奇，继续向宇宙深处。</span><a href="#observatory">回到观测台</a></footer>
+    <noscript><p class="noscript">启用 JavaScript 后即可体验粒子观测台。你仍可以阅读黑洞说明和查看参考项目。</p></noscript>
+  </body>
+</html>
