@@ -30,174 +30,23 @@
     particles[i + 3] = random();
   }
 
-  const uniforms = `
-    uniform vec2 uResolution;
-    uniform float uScale;
-    uniform float uISCO;
-    uniform float uOuter;
-    uniform float uSpin;
-    uniform float uShadow;
-    uniform float uOffset;
-    uniform float uTime;
-    uniform float uTilt;
-    uniform float uYaw;
-    uniform float uPalette;
-    uniform float uImage;
-  `;
-  const spectrum = `
-    vec3 spectrum(float temperature) {
-      float t = clamp(temperature, 0., 1.35);
-      vec3 warm = mix(vec3(.48,.035,.006), vec3(1.,.43,.10), smoothstep(.15,.65,t));
-      warm = mix(warm, vec3(1.,.88,.68), smoothstep(.60,1.20,t));
-      vec3 cool = mix(vec3(.04,.14,.35), vec3(.48,.80,1.), smoothstep(.15,1.,t));
-      return mix(warm,cool,uPalette);
-    }
-  `;
-  const quadVertex = `
-    attribute vec2 aPosition;
-    varying vec2 vUv;
-    void main() { vUv = aPosition*.5+.5; gl_Position=vec4(aPosition,0.,1.); }
-  `;
-  const spaceFragment = `
-    precision highp float;
-    varying vec2 vUv;
-    ${uniforms}
-    ${spectrum}
-    void main() {
-      vec2 p=(vUv-.5)*uResolution/uScale;
-      vec2 shadowPoint=p-vec2(uOffset,0.);
-      shadowPoint.x/=1.-.045*uSpin;
-      float r=length(shadowPoint);
-      // The photon-ring image is schematic; it is not a numerical null-geodesic solution.
-      float distanceToRing=abs(r-uShadow);
-      float ring=exp(-distanceToRing*19.);
-      float halo=exp(-distanceToRing*1.3)*.075;
-      float secondRing=exp(-abs(r-uShadow*1.045)*27.)*.12;
-      float beaming=.67-.20*shadowPoint.x/max(r,.001)*cos(radians(uTilt));
-      vec3 color=vec3(.014,.016,.022);
-      color+=spectrum(.95)*(ring*.68+halo+secondRing)*beaming;
-      color*=smoothstep(uShadow-.055,uShadow+.02,r);
-      gl_FragColor=vec4(vec3(1.)-exp(-color),1.);
-    }
-  `;
-  const particleVertex = `
-    precision highp float;
-    attribute vec4 aSeed;
-    ${uniforms}
-    ${spectrum}
-    varying vec3 vColor;
-    varying float vBrightness;
-    varying float vForeground;
-    void main() {
-      float r=mix(uISCO+.025,uOuter,aSeed.x);
-      // Exact circular-orbit Kerr angular velocity in geometrized units; a=0 gives Schwarzschild.
-      float omega=1./(pow(r,1.5)+uSpin);
-      float phase=aSeed.y+uTime*omega*19.+uYaw;
-      float inclination=sin(radians(uTilt));
-      float x=cos(phase)*r, y=sin(phase)*r;
-      float h=aSeed.z*r*.024;
-      float depth=y*cos(radians(uTilt))-h*inclination;
-      float perspective=100./(100.+depth);
-      vec2 p=vec2(x,y*inclination+h*cos(radians(uTilt)))*perspective;
-      float rear=max(0.,y/r);
-      // Separate direct and secondary images preserve foreground disk light in front of the shadow.
-      p.y+=uShadow*.62*rear*exp(-pow(abs(p.x)/(uShadow*1.7),3.))*(1.-inclination);
-      float visibility=1.;
-      if(uImage>.5) {
-        visibility=step(0.,y)*(1.-inclination)*.24;
-        float theta=atan(p.y,p.x);
-        float imageRadius=uShadow*(1.02+.12*(1.-aSeed.x));
-        p=vec2(uOffset,0.)+vec2(cos(theta),sin(theta))*imageRadius;
-      }
-      vec2 pixel=uResolution*.5+p*uScale;
-      gl_Position=vec4(pixel/uResolution*2.-1.,0.,1.);
-      gl_PointSize=clamp(uScale*(.055+aSeed.w*.095)*perspective,1.5,5.);
-      float ratio=r/uISCO;
-      float thermal=pow(ratio,-.75)*pow(max(1.-sqrt(1./ratio),0.),.25)/.488;
-      float gravitational=sqrt(max(1.-3./r+2.*uSpin/pow(r,1.5),.01))/(1.+uSpin/pow(r,1.5));
-      // Line-of-sight Doppler beaming plus gravitational redshift; spectral colors are approximated.
-      float beta=sqrt(1./r);
-      float shift=clamp(gravitational/(1.+beta*cos(radians(uTilt))*cos(phase)),.18,1.6);
-      vColor=spectrum(thermal*shift);
-      float turbulence=.8+.2*sin(phase*4.+r*.9-uTime*.13+aSeed.z);
-      // Display exposure compensates for subpixel emission without changing orbital dynamics.
-      vBrightness=(.38+aSeed.w*.68)*pow(thermal,.8)*pow(shift,3.)*turbulence*visibility*3.2;
-      vForeground=step(y,0.)*(1.-smoothstep(.72,.97,inclination))*(1.-uImage);
-    }
-  `;
-  const particleFragment = `
-    precision highp float;
-    ${uniforms}
-    varying vec3 vColor;
-    varying float vBrightness;
-    varying float vForeground;
-    void main() {
-      vec2 p=(gl_FragCoord.xy-uResolution*.5)/uScale-vec2(uOffset,0.);
-      p.x/=1.-.045*uSpin;
-      if(length(p)<uShadow && vForeground<.5) discard;
-      if(vBrightness<.001) discard;
-      float d=length(gl_PointCoord-.5)*2.;
-      float alpha=exp(-d*d*4.2)*vBrightness;
-      gl_FragColor=vec4(vColor*alpha,alpha);
-    }
-  `;
-
+  // Trace geometry only when camera/model parameters change; resolve animated light every frame.
   function createWebGLRenderer() {
-    const gl=canvas.getContext("webgl",{alpha:false,antialias:false,powerPreference:"high-performance"});
-    if(!gl) return null;
-    function shader(type,source) {
-      const result=gl.createShader(type);
-      gl.shaderSource(result,source);gl.compileShader(result);
-      if(!gl.getShaderParameter(result,gl.COMPILE_STATUS)) {
-        const message=gl.getShaderInfoLog(result);gl.deleteShader(result);throw new Error(message);
-      }
-      return result;
-    }
-    function program(vertex,fragment) {
-      const result=gl.createProgram();
-      const shaders=[shader(gl.VERTEX_SHADER,vertex),shader(gl.FRAGMENT_SHADER,fragment)];
-      shaders.forEach(item=>gl.attachShader(result,item));gl.linkProgram(result);
-      shaders.forEach(item=>gl.deleteShader(item));
-      if(!gl.getProgramParameter(result,gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(result));
-      const locations=Object.fromEntries(["uResolution","uScale","uISCO","uOuter","uSpin","uShadow","uOffset","uTime","uTilt","uYaw","uPalette","uImage"].map(name=>[name,gl.getUniformLocation(result,name)]));
-      return {result,locations};
-    }
-    const space=program(quadVertex,spaceFragment);
-    const disk=program(particleVertex,particleFragment);
-    const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);
-    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);
-    const points=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,points);gl.bufferData(gl.ARRAY_BUFFER,particles,gl.STATIC_DRAW);
-    const quadAttribute=gl.getAttribLocation(space.result,"aPosition");
-    const seedAttribute=gl.getAttribLocation(disk.result,"aSeed");
-    function bind(item,image=0) {
-      const model=physics.model(state),u=item.locations;
-      gl.useProgram(item.result);gl.uniform2f(u.uResolution,size.width,size.height);
-      for(const [key,value] of Object.entries({uScale:size.scale,uISCO:model.isco,uOuter:model.outer,uSpin:model.spin,uShadow:model.shadow,uOffset:model.offset,uTime:state.time,uTilt:state.tilt,uYaw:state.yaw,uPalette:state.palette==="ice"?1:0,uImage:image})) gl.uniform1f(u[key],value);
-    }
-    return {
-      kind:"webgl",count:()=>state.density,
-      draw() {
-        gl.viewport(0,0,size.width,size.height);gl.disable(gl.BLEND);bind(space);
-        gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.enableVertexAttribArray(quadAttribute);
-        gl.vertexAttribPointer(quadAttribute,2,gl.FLOAT,false,0,0);gl.drawArrays(gl.TRIANGLES,0,6);gl.disableVertexAttribArray(quadAttribute);
-        gl.bindBuffer(gl.ARRAY_BUFFER,points);gl.enableVertexAttribArray(seedAttribute);
-        gl.vertexAttribPointer(seedAttribute,4,gl.FLOAT,false,0,0);gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);
-        bind(disk,1);gl.drawArrays(gl.POINTS,0,state.density);
-        bind(disk,0);gl.drawArrays(gl.POINTS,0,state.density);
-        gl.disableVertexAttribArray(seedAttribute);gl.disable(gl.BLEND);
-      }
-    };
+    const engine=globalThis.BlackHoleRaytracer.create({canvas,particles,state,physics,onNeedsFrame:requestRender});
+    return engine && {...engine,draw:()=>engine.draw(size)};
   }
 
   // A WebGL canvas cannot change context type; preserve its accessible name on the replacement.
   function createCanvasRenderer() {
     const replacement=canvas.cloneNode(false);canvas.replaceWith(replacement);
     const context=replacement.getContext("2d");if(!context)throw new Error("Canvas unavailable");
+    let profile=null;
     return {
       kind:"canvas",canvas:replacement,count:()=>Math.min(state.density,5000),
       draw() {
         const {width:w,height:h,scale,dpr}=size,model=physics.model(state);
         const cx=w*.5,cy=h*.5,shadowX=cx+model.offset*scale;
+        if(!profile||profile.spin!==model.spin)profile={...physics.diskProfile(model.spin,model.outer),spin:model.spin};
         context.fillStyle="#08090d";context.fillRect(0,0,w,h);
         const rgb=state.palette==="ice"?"138,197,247":"239,174,103";
         const halo=context.createRadialGradient(shadowX,cy,model.shadow*scale*.98,shadowX,cy,model.shadow*scale*1.25);
@@ -216,7 +65,7 @@
           py+=model.shadow*.62*Math.max(0,y/r)*Math.exp(-Math.pow(Math.abs(px)/(model.shadow*1.7),3))*(1-inclination);
           const hidden=Math.hypot((px-model.offset)/(1-.045*model.spin),py)<model.shadow;
           if(hidden && (y>0 || inclination>.84))continue;
-          const thermal=physics.temperature(r,model.isco);
+          const thermal=Math.pow(physics.sampleProfile(profile,r),.25);
           const gravitational=Math.sqrt(Math.max(1-3/r+2*model.spin/Math.pow(r,1.5),.01))/(1+model.spin/Math.pow(r,1.5));
           const shift=Math.max(.18,Math.min(1.6,gravitational/(1+Math.sqrt(1/r)*Math.cos(tilt)*Math.cos(a))));
           const alpha=Math.min(.85,(.30+particles[n+3]*.55)*Math.pow(thermal,.8)*Math.pow(shift,3));
@@ -257,7 +106,7 @@
   }
   function snapshot() {
     const model=physics.model(state);
-    return {model:state.model,spin:model.spin,isco:model.isco,tilt:state.tilt,speed:state.speed,density:renderer.count(),zoom:state.zoom,palette:state.palette,paused:state.paused,controlsExpanded:shell.open};
+    return {model:state.model,spin:model.spin,isco:model.isco,tilt:state.tilt,speed:state.speed,density:renderer.count(),zoom:state.zoom,palette:state.palette,paused:state.paused,controlsExpanded:shell.open,render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
   }
   function updateUI(message) {
     const model=physics.model(state);
@@ -278,7 +127,7 @@
     document.querySelector("#pause-label").textContent=state.paused?"播放":"暂停";
     document.querySelector("#pause-icon").setAttribute("d",state.paused?"M6 4l9 6-9 6Z":"M7 4v12M13 4v12");
     document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} PT`;
-    document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容画面":state.paused?"画面已暂停":"实时粒子场";
+    document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容画面":state.paused?"画面已暂停":"实时光线成像";
     if(message)status.textContent=message;
   }
   function applySettings(settings,message) {
@@ -344,7 +193,7 @@
   if(renderer.kind==="webgl") {
     surface.addEventListener("webglcontextlost",event=>{event.preventDefault();contextLost=true;if(frame)cancelAnimationFrame(frame);frame=0;state.paused=true;updateUI("图形画面暂时中断，正在等待恢复。");});
     surface.addEventListener("webglcontextrestored",()=>{
-      try {renderer=createWebGLRenderer();contextLost=false;updateUI("画面已恢复，点击播放继续观测。");requestRender();}
+      try {renderer.dispose?.();const restored=createWebGLRenderer();if(!restored)throw new Error("Renderer restoration unavailable");renderer=restored;contextLost=false;updateUI("画面已恢复，点击播放继续观测。");requestRender();}
       catch {status.textContent="画面未能恢复，请刷新页面重试。";shell.open=true;}
     });
   }

@@ -1,0 +1,38 @@
+Interstellar rendering references
+
+The Kerr-Schild Hamiltonian ray integrator is an independent implementation
+of general-relativistic equations. NPGS BlackHole_common.glsl was inspected
+as a reference for adaptive ray integration and staged rendering; no NPGS
+source code is included in this distribution. NPGS is licensed under GPL-3.0.
+Reference: https://github.com/baopinshui/NPGS/blob/master/NPGS/Sources/Engine/Shaders/BlackHole_common.glsl
+
+The Page-Thorne thin-disk flux expression in physics.js was adapted from
+grtrans kerr.f90/krolikc and fluid_model_thindisk.f90.
+Reference: https://github.com/jadexter/grtrans
+Please cite: Dexter (2016), arXiv:1602.03184; Dexter & Agol (2009), arXiv:0903.0620.
+This site does not include the grtrans Fortran runtime, geokerr elliptic
+integrator, full polarized transfer solver, or GRMHD simulation data.
+
+The applicable grtrans MIT notice follows:
+
+MIT License
+
+Copyright (c) 2016 jadexter
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -26,12 +26,46 @@
     return 1 / (Math.pow(radius, 1.5) + spin);
   }
 
-  // Zero-torque thin-disk temperature profile; this is not a full Novikov–Thorne solver.
-  function temperature(radius, inner) {
-    if (radius <= inner) return 0;
-    const ratio = radius / inner;
-    return Math.pow(ratio, -0.75) * Math.pow(1 - Math.sqrt(1 / ratio), 0.25) / 0.488;
+  // Page–Thorne flux factor, adapted from grtrans kerr.f90/krolikc (MIT; see notices.txt).
+  // The zero-spin root at zero has a vanishing coefficient and must not divide by zero.
+  function thinDiskFlux(radius, spin) {
+    const inner=iscoRadius(spin);
+    if(radius<=inner)return 0;
+    const y=Math.sqrt(radius),y0=Math.sqrt(inner),angle=Math.acos(spin)/3;
+    const roots=[2*Math.cos(angle-Math.PI/3),2*Math.cos(angle+Math.PI/3),-2*Math.cos(angle)];
+    let factor=1-y0/y-1.5*spin/y*Math.log(y/y0);
+    roots.forEach((root,i)=>{
+      if(Math.abs(root)<1e-10)return;
+      const others=roots.filter((_,j)=>j!==i);
+      const coefficient=3*(root-spin)**2/(y*root*(root-others[0])*(root-others[1]));
+      factor-=coefficient*Math.log((y-root)/(y0-root));
+    });
+    const b=1-3/radius+2*spin/radius**1.5;
+    return Math.max(0,factor/(b*radius**3));
   }
 
-  globalThis.BlackHolePhysics = Object.freeze({ iscoRadius, model, angularVelocity, temperature });
+  function diskProfile(spin,outer=26,count=256) {
+    const inner=iscoRadius(spin),flux=new Float32Array(count);
+    let peak=0;
+    for(let i=0;i<count;i++) {
+      flux[i]=thinDiskFlux(inner+(outer-inner)*i/(count-1),spin);peak=Math.max(peak,flux[i]);
+    }
+    for(let i=0;i<count;i++)flux[i]/=Math.max(peak,1e-20);
+    return {inner,outer,flux,peak};
+  }
+
+  function temperature(radius,inner,spin=0) {
+    if(radius<=inner)return 0;
+    const reference=thinDiskFlux(inner*1.6,spin);
+    return Math.pow(thinDiskFlux(radius,spin)/Math.max(reference,1e-20),.25);
+  }
+
+  function sampleProfile(profile,radius) {
+    if(radius<=profile.inner||radius>=profile.outer)return 0;
+    const index=(radius-profile.inner)/(profile.outer-profile.inner)*(profile.flux.length-1);
+    const lower=Math.floor(index),fraction=index-lower;
+    return profile.flux[lower]*(1-fraction)+profile.flux[Math.min(lower+1,profile.flux.length-1)]*fraction;
+  }
+
+  globalThis.BlackHolePhysics = Object.freeze({ iscoRadius, model, angularVelocity, thinDiskFlux, diskProfile, sampleProfile, temperature });
 })();
