@@ -50,12 +50,23 @@ const outside=g.trace(camera,critical+.03,0,6,26,{stepScale:.05,steps:384});
 assert.ok(inside.captured && outside.escaped);
 assert.ok(g.trace(camera,0,0,6,26).captured);
 
-// Disk-plane crossings stay within the captured pair: rays near the photon sphere
-// cross the equator inside the ISCO hole, so the two-hit GPU cache loses no disk image
-// (Gralla, Holz & Wald 2019 higher-order rings carry no disk light in this geometry).
+// These Schwarzschild rays cross the disk at most twice. This is a sampled
+// Schwarzschild result, not a bound on all viewing angles or on Kerr images.
 for(const b of [critical+.005,critical+.05,5.5,6,7.5,9,12,16,20,24]){
  const traced=g.trace(camera,b,0,6,26,{stepScale:.02,steps:900});
  assert.ok(traced.hits.length<=2,`crossings within the disk must stay <=2 at b=${b}`);
+}
+
+// Filling the disk cache does not imply capture: this two-hit Schwarzschild ray
+// still reaches the sky. Kerr counterexamples keep the documented two-hit
+// approximation honest; those extra crossings remain outside the emission cache.
+const throughDisk=g.trace(g.observer(0,8),-7.5,-4.5,6,26,{stepScale:.03,steps:800});
+assert.equal(throughDisk.hits.length,2);
+assert.ok(throughDisk.escaped&&!throughDisk.captured);
+for(const [spin,x,y,count] of [[.65,5,-3.5,3],[.95,-.5,-4.5,4]]){
+ const traced=g.trace(g.observer(spin,18),x,y,p.iscoRadius(spin),26,{stepScale:.015,steps:1400});
+ assert.equal(traced.hits.length,count);
+ assert.ok(traced.escaped&&traced.maxError<2e-7);
 }
 
 // Doppler beaming asymmetry: mirrored rays must show the prograde side blueshifted
@@ -82,4 +93,4 @@ for(const stage of stages){
 for(const name of raytracer.matchAll(/program\([^,]+,[^,]+,\[([^\]]*)\]/g)){
  for(const uniform of name[1].matchAll(/"([^"]+)"/g))assert.ok(raytracer.includes(`uniform ${/\b(u[A-Z])/.test(uniform[1])?'':'sampler2D '}${uniform[1]}`)||new RegExp(`uniform [\\w\\s,]*\\b${uniform[1]}\\b`).test(raytracer),`undeclared uniform ${uniform[1]}`);
 }
-console.log('PASS: 96 disk profiles, observer tetrads, null initial rays, Hamiltonian gradients, conserved escaping rays, Schwarzschild capture boundary, two-crossing disk cache, Doppler asymmetry and shader structure.');
+console.log('PASS: 96 disk profiles, observer tetrads, null initial rays, Hamiltonian gradients, conserved escaping rays, Schwarzschild capture boundary, sampled disk crossings, sky escape behind two disk hits, Kerr cache-limit counterexamples, Doppler asymmetry and shader structure.');

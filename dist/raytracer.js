@@ -5,7 +5,8 @@
     const gl=canvas.getContext("webgl2",{alpha:false,antialias:false,powerPreference:"high-performance"});
     if(!gl||!gl.getExtension("EXT_color_buffer_float"))return null;
     const geodesics=globalThis.BlackHoleGeodesics;
-    const metrics={mode:"webgl2-kerr-raytrace",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceSubmitMs:0,traceQuality:"interactive",traceBudget:0,canvasWidth:0,canvasHeight:0,imageWidth:0,imageHeight:0,refinementRequests:0};
+    const navigation=globalThis.BlackHoleNavigation;
+    const metrics={mode:"webgl2-kerr-raytrace",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceSubmitMs:0,traceQuality:"interactive",traceBudget:0,canvasWidth:0,canvasHeight:0,imageWidth:0,imageHeight:0,refinementRequests:0,observerDistance:80,orbitAngle:0,horizonFade:0};
     const vertex=`#version 300 es
       layout(location=0) in vec2 aPosition;
       out vec2 vUv;
@@ -64,9 +65,11 @@
             if(radius>uInner&&radius<uOuter) {
               vec4 hit=record(position,covector,energy);
               if(hit.x>0.) {
-                if(hits==0)firstHit=hit;else secondHit=hit;
+                if(hits==0)firstHit=hit;else if(hits==1)secondHit=hit;
                 hits++;
-                if(hits>=2)break;
+                // The two-hit cache limits disk emission, not the ray's endpoint.
+                // Continue to capture/escape so translucent disk light retains its
+                // background; later Kerr crossings must not overwrite the second hit.
               }
             }
           }
@@ -77,11 +80,11 @@
     const atlasVertex=`#version 300 es
       precision highp float;
       layout(location=0) in vec4 aSeed;
-      uniform float uInner,uOuter,uSpin,uTime,uYaw;
+      uniform float uInner,uOuter,uSpin,uTime;
       out float vWeight;
       void main() {
         float r=mix(uInner+.025,uOuter,aSeed.x);
-        float phase=aSeed.y+uTime*19./(pow(r,1.5)+uSpin)+uYaw;
+        float phase=aSeed.y+uTime*19./(pow(r,1.5)+uSpin);
         // Two guard texels keep wrapped point centers inside the clip volume.
         float u=(fract(phase/6.28318530718+.5)*1024.+2.+float(gl_InstanceID-1)*1024.)/1028.;
         gl_Position=vec4(u*2.-1.,aSeed.x*2.-1.,0.,1.);
@@ -103,7 +106,7 @@
       in vec2 vUv;
       out vec4 color;
       uniform sampler2D uFirst,uSecond,uAtlas,uFlux,uSky;
-      uniform float uInner,uOuter,uPalette;
+      uniform float uInner,uOuter,uViewYaw;
       float hash13(vec3 p){p=fract(p*.1031);p+=dot(p,p.zyx+31.32);return fract((p.x+p.y)*p.z);}
       vec3 hash33(vec3 p){p=fract(p*vec3(.1031,.1030,.0973));p+=dot(p,p.yxz+33.33);return fract((p.xxy+p.yxx)*p.zyx);}
       float vnoise(vec3 p){
@@ -114,9 +117,7 @@
       vec3 spectrum(float temperature) {
         float t=clamp(temperature,0.,1.6);
         vec3 warm=mix(vec3(.62,.045,.006),vec3(1.,.48,.12),smoothstep(.18,.72,t));
-        warm=mix(warm,vec3(1.,.92,.76),smoothstep(.72,1.30,t));
-        vec3 cool=mix(vec3(.04,.16,.37),vec3(.56,.85,1.),smoothstep(.15,1.10,t));
-        return mix(warm,cool,uPalette);
+        return mix(warm,vec3(1.,.92,.76),smoothstep(.72,1.30,t));
       }
       // Milky-Way helpers shared by dust and stars: a gaussian plane, dark dust rifts
       // along it, and a bulge toward one galactic-center direction on the great circle.
@@ -157,7 +158,7 @@
         float q=(hit.x-uInner)/(uOuter-uInner);
         float textureRadius=(q*255.+.5)/256.;
         float flux=texture(uFlux,vec2(textureRadius,.5)).r;
-        float atlasAngle=(fract(hit.y/6.28318530718+.5)*1024.+2.)/1028.;
+        float atlasAngle=(fract((hit.y+uViewYaw)/6.28318530718+.5)*1024.+2.)/1028.;
         float grain=texture(uAtlas,vec2(atlasAngle,q)).r;
         // The outer rim dissolves over the last ~12% of radius instead of clipping,
         // so the disk meets the sky through a gradient rather than a hard cut.
@@ -189,6 +190,10 @@
         // Use the full bilinear ramp of the escape flag so the silhouette keeps a soft antialiased edge.
         float open=smoothstep(.02,.98,escape.w);
         vec3 direction=escape.xyz/max(length(escape.xyz),1e-3);
+        // Kerr axial symmetry lets orbiting reuse ray maps: rotate world sky directions
+        // and disk azimuths together while keeping local frequencies unchanged.
+        float c=cos(uViewYaw),s=sin(uViewYaw);
+        direction=vec3(c*direction.x-s*direction.y,s*direction.x+c*direction.y,direction.z);
         color=vec4(light.rgb+light.a*open*skyColor(direction),1.);
       }
     `;
@@ -198,6 +203,7 @@
       out vec4 color;
       uniform sampler2D uImage;
       uniform vec2 uTexel;
+      uniform float uDiveFade;
       vec3 bright(vec2 uv,float threshold){vec3 c=texture(uImage,uv).rgb;return max(c-vec3(threshold),vec3(0.));}
       void main() {
         vec3 light=texture(uImage,vUv).rgb;
@@ -211,7 +217,8 @@
                   +bright(vUv+uTexel*vec2(7.,-7.),.3)+bright(vUv-uTexel*vec2(7.,-7.),.3))*.028;
         vec3 mapped=vec3(1.)-exp(-(light+bloom+halo)*2.4);
         // No base lift: the shadow stays truly black so it reads against the lensed sky.
-        color=vec4(pow(mapped,vec3(.72)),1.);
+        // The horizon crossing is a cinematic endpoint; reversing zoom restores the scene.
+        color=vec4(pow(mapped,vec3(.72))*(1.-uDiveFade),1.);
       }
     `;
 
@@ -229,9 +236,9 @@
       return {item,uniform:Object.fromEntries(names.map(name=>[name,gl.getUniformLocation(item,name)]))};
     }
     const traceProgram=program(vertex,traceFragment,["uExtent","uOrigin","uObserver","uRight","uUp","uForward","uDistance","uSpin","uHorizon","uInner","uOuter","uStepScale","uSteps"]);
-    const atlasProgram=program(atlasVertex,atlasFragment,["uInner","uOuter","uSpin","uTime","uYaw"]);
-    const emitProgram=program(vertex,emitFragment,["uFirst","uSecond","uAtlas","uFlux","uSky","uInner","uOuter","uPalette"]);
-    const displayProgram=program(vertex,displayFragment,["uImage","uTexel"]);
+    const atlasProgram=program(atlasVertex,atlasFragment,["uInner","uOuter","uSpin","uTime"]);
+    const emitProgram=program(vertex,emitFragment,["uFirst","uSecond","uAtlas","uFlux","uSky","uInner","uOuter","uViewYaw"]);
+    const displayProgram=program(vertex,displayFragment,["uImage","uTexel","uDiveFade"]);
     const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);objects.push(["buffer",quad]);
     const seeds=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,seeds);gl.bufferData(gl.ARRAY_BUFFER,particles,gl.STATIC_DRAW);objects.push(["buffer",seeds]);
     function texture(width,height,filter=gl.LINEAR,data=null) {
@@ -285,7 +292,8 @@
       width=Math.max(1,Math.floor(width*fit));height=Math.max(1,Math.floor(height*fit));
       if(!map||map.width!==width||map.height!==height){discard(map);map=target(width,height,3,gl.LINEAR);}
       gl.bindFramebuffer(gl.FRAMEBUFFER,map.framebuffer);gl.viewport(0,0,width,height);gl.disable(gl.BLEND);bindQuad(traceProgram);
-      const camera=geodesics.observer(model.spin,state.tilt),u=traceProgram.uniform;
+      const flight=navigation.view(state.viewZoom??state.zoom,state.reducedMotion);
+      const camera=geodesics.observer(model.spin,state.tilt,flight.distance),u=traceProgram.uniform;
       gl.uniform2f(u.uExtent,viewport.width/viewport.scale,viewport.height/viewport.scale);
       gl.uniform3fv(u.uOrigin,camera.origin);gl.uniform4fv(u.uObserver,camera.u);
       gl.uniform4fv(u.uRight,camera.basis[0]);gl.uniform4fv(u.uUp,camera.basis[1]);gl.uniform4fv(u.uForward,camera.basis[2]);
@@ -295,7 +303,7 @@
       metrics.traceQuality=high?"refined":"interactive";metrics.traceBudget=budget;
     }
     function ensureGeometry(model) {
-      const key=[model.spin,state.tilt,state.zoom,viewport.width,viewport.height,model.isco,model.outer].join(":");
+      const key=[model.spin,state.tilt,state.viewZoom??state.zoom,viewport.width,viewport.height,model.isco,model.outer].join(":");
       if(key!==geometryKey) {
         geometryKey=key;refined=forceRefinement;
         clearTimeout(timer);traceMap(model,refined);refineAt=performance.now()+140;
@@ -308,20 +316,21 @@
       kind:"webgl",count:()=>state.density,metrics,
       draw(size) {
         if(disposed)return;
-        viewport=size;const model=physics.model(state);updateProfile(model);ensureGeometry(model);
+        viewport=size;const model=physics.model(state),flight=navigation.view(state.viewZoom??state.zoom,state.reducedMotion);updateProfile(model);ensureGeometry(model);
+        metrics.observerDistance=flight.distance;metrics.orbitAngle=state.yaw+flight.orbit;metrics.horizonFade=flight.fade;
         const {width,height}=imageDimensions(size);
         metrics.canvasWidth=size.width;metrics.canvasHeight=size.height;metrics.imageWidth=width;metrics.imageHeight=height;
         if(!image||image.width!==width||image.height!==height){discard(image);image=target(width,height);}
         gl.bindFramebuffer(gl.FRAMEBUFFER,atlas.framebuffer);gl.viewport(0,0,atlas.width,atlas.height);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(atlasProgram.item);gl.bindBuffer(gl.ARRAY_BUFFER,seeds);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,0,0);
-        for(const [key,value] of Object.entries({uInner:model.isco,uOuter:model.outer,uSpin:model.spin,uTime:state.time,uYaw:state.yaw}))gl.uniform1f(atlasProgram.uniform[key],value);
+        for(const [key,value] of Object.entries({uInner:model.isco,uOuter:model.outer,uSpin:model.spin,uTime:state.time}))gl.uniform1f(atlasProgram.uniform[key],value);
         gl.enable(gl.BLEND);gl.blendFunc(gl.ONE,gl.ONE);
         // Seam replicas are the same source particles, not extra particles in the UI count.
         gl.drawArraysInstanced(gl.POINTS,0,state.density,3);gl.disable(gl.BLEND);
         gl.bindFramebuffer(gl.FRAMEBUFFER,image.framebuffer);gl.viewport(0,0,width,height);bindQuad(emitProgram);
         sampler(emitProgram,"uFirst",0,map.images[0]);sampler(emitProgram,"uSecond",1,map.images[1]);sampler(emitProgram,"uAtlas",2,atlas.images[0]);sampler(emitProgram,"uFlux",3,fluxTexture);sampler(emitProgram,"uSky",4,map.images[2]);
-        gl.uniform1f(emitProgram.uniform.uInner,model.isco);gl.uniform1f(emitProgram.uniform.uOuter,model.outer);gl.uniform1f(emitProgram.uniform.uPalette,state.palette==="ice"?1:0);gl.drawArrays(gl.TRIANGLES,0,6);
-        gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);bindQuad(displayProgram);sampler(displayProgram,"uImage",0,image.images[0]);gl.uniform2f(displayProgram.uniform.uTexel,1/width,1/height);gl.drawArrays(gl.TRIANGLES,0,6);
+        gl.uniform1f(emitProgram.uniform.uInner,model.isco);gl.uniform1f(emitProgram.uniform.uOuter,model.outer);gl.uniform1f(emitProgram.uniform.uViewYaw,state.yaw+flight.orbit);gl.drawArrays(gl.TRIANGLES,0,6);
+        gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);bindQuad(displayProgram);sampler(displayProgram,"uImage",0,image.images[0]);gl.uniform2f(displayProgram.uniform.uTexel,1/width,1/height);gl.uniform1f(displayProgram.uniform.uDiveFade,flight.fade);gl.drawArrays(gl.TRIANGLES,0,6);
         metrics.frames++;
       },
       refine() {

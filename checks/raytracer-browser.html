@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>光线缓存 GPU 回归检查</title>
+<h1>光线缓存 GPU 回归检查</h1>
+<pre id="result" role="status">正在检查…</pre>
+<script src="../dist/physics.js"></script>
+<script src="../dist/geodesics.js"></script>
+<script src="../dist/navigation.js"></script>
+<script src="../dist/raytracer.js"></script>
+<script>
+"use strict";
+// Serve the repository root, then open /checks/raytracer-browser.html. This
+// diagnostic lives outside dist and reads the actual floating-point GPU cache.
+const result=document.querySelector("#result");
+try {
+  const canvas=document.createElement("canvas");
+  canvas.width=canvas.height=257;
+  const gl=canvas.getContext("webgl2");
+  if(!gl)throw new Error("WebGL2 unavailable; GPU behavior was not verified.");
+  const attachments=new Map(),attach=gl.framebufferTexture2D.bind(gl);
+  // Identify the three-attachment ray map without adding a production debug API.
+  gl.framebufferTexture2D=function(...args){
+    attach(...args);
+    const framebuffer=gl.getParameter(gl.FRAMEBUFFER_BINDING);
+    if(!attachments.has(framebuffer))attachments.set(framebuffer,new Set());
+    attachments.get(framebuffer).add(args[1]);
+  };
+  const physics=BlackHolePhysics,geodesics=BlackHoleGeodesics;
+  const state={model:"schwarzschild",spin:0,tilt:8,zoom:1,density:4000,time:0,yaw:0};
+  const engine=BlackHoleRaytracer.create({canvas,particles:new Float32Array(16000),state,physics,onNeedsFrame(){}});
+  if(!engine)throw new Error("Floating-point WebGL2 targets unavailable.");
+  const size={width:257,height:257,scale:16},reports=[];
+  const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+  try {
+    for(const [spin,tilt,alpha,beta] of [[0,8,-7.5,-4.5],[.65,18,5,-3.5],[.95,18,-.5,-4.5]]){
+      Object.assign(state,{model:spin===0?"schwarzschild":"kerr",spin,tilt});
+      engine.refine();engine.draw(size);
+      const model=physics.model(state),camera=geodesics.observer(spin,tilt);
+      const x=Math.round(128+alpha*16),y=Math.round(128+beta*16);
+      const expected=geodesics.trace(camera,alpha,beta,model.isco,model.outer);
+      assert(expected.escaped&&expected.hits.length>=2,"Invalid CPU witness.");
+      const framebuffer=[...attachments].find(([,slots])=>slots.size===3)?.[0];
+      assert(framebuffer,"Ray map framebuffer missing.");
+      gl.bindFramebuffer(gl.FRAMEBUFFER,framebuffer);
+      const values=[];
+      for(let slot=0;slot<3;slot++){
+        gl.readBuffer(gl.COLOR_ATTACHMENT0+slot);
+        const pixel=new Float32Array(4);
+        gl.readPixels(x,y,1,1,gl.RGBA,gl.FLOAT,pixel);values.push([...pixel]);
+        assert(gl.getError()===gl.NO_ERROR,"GPU cache readback failed.");
+      }
+      gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+      // CPU predictions are independent of GPU cache termination. Verify both
+      // sky escape and that later crossings did not replace the nearest pair.
+      assert(values[2][3]>.99,`a=${spin}: disk cache incorrectly suppresses the sky.`);
+      for(let hit=0;hit<2;hit++)assert(Math.abs(values[hit][0]-expected.hits[hit].r)<.04,`a=${spin}: cached hit ${hit+1} is not the nearest disk crossing.`);
+      reports.push({spin,tilt,cpuCrossings:expected.hits.length,gpuCachedRadii:values.slice(0,2).map(hit=>hit[0]),skyEscape:values[2][3]});
+    }
+    result.textContent="PASS: actual GPU sky escape and nearest-two disk cache.\n"+JSON.stringify(reports,null,2);
+  } finally {engine.dispose();}
+} catch(error){result.textContent="FAIL: "+error.message;}
+</script>
+</html>

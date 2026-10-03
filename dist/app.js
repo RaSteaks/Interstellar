@@ -7,14 +7,17 @@
   const toggle = shell.querySelector("summary");
   const status = document.querySelector("#status");
   const physics = globalThis.BlackHolePhysics;
+  const navigation = globalThis.BlackHoleNavigation;
+  const flightStatus = document.querySelector("#flight-status");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const defaults = { model: "kerr", spin: 0.65, tilt: 18, speed: 1, density: 32000, zoom: 1, palette: "amber", yaw: 0 };
-  const state = { ...defaults, paused: reducedMotion.matches, time: 0 };
+  const defaults = { model: "kerr", spin: 0.65, tilt: 18, speed: 1, density: 32000, zoom: 1, yaw: 0 };
+  const state = { ...defaults, paused: reducedMotion.matches, time: 0, viewZoom: defaults.zoom, reducedMotion: reducedMotion.matches };
   const fields = Object.fromEntries(["spin", "tilt", "speed", "density", "zoom"].map(key => [key, document.getElementById(key)]));
   let renderer;
   let frame = 0;
   let lastTime = 0;
   let contextLost = false;
+  let flightStage = "observe";
   let size = { width: 1, height: 1, dpr: 1, scale: 1 };
 
   // Fixed seeds keep density changes stable. Gaussian heights form a thin disk rather than a tube.
@@ -72,9 +75,10 @@
         if(!profile||profile.spin!==model.spin)profile={...physics.diskProfile(model.spin,model.outer),spin:model.spin};
         context.fillStyle="#08090d";context.fillRect(0,0,w,h);
         // Sky first: stars and the Milky-Way band sit behind halo, shadow and disk.
-        const tiltAngle=state.tilt*Math.PI/180,cosYaw=Math.cos(state.yaw),sinYaw=Math.sin(state.yaw);
+        const flight=navigation.view(state.viewZoom,state.reducedMotion),viewYaw=state.yaw+flight.orbit;
+        const tiltAngle=state.tilt*Math.PI/180,cosYaw=Math.cos(-viewYaw),sinYaw=Math.sin(-viewYaw);
         const forwardY=Math.cos(tiltAngle),forwardZ=-Math.sin(tiltAngle),upY=Math.sin(tiltAngle),upZ=Math.cos(tiltAngle);
-        const focal=h/((h/scale)*.5/80)*.5;
+        const focal=flight.distance*scale;
         context.globalCompositeOperation="lighter";
         for(const blob of sky.blobs) {
           const rx=blob.x*cosYaw-blob.y*sinYaw,ry=blob.x*sinYaw+blob.y*cosYaw,depth=ry*forwardY+blob.z*forwardZ;
@@ -92,7 +96,7 @@
           context.beginPath();context.arc(cx+rx/depth*focal,cy-(ry*upY+star.z*upZ)/depth*focal,star.r*dpr,0,Math.PI*2);context.fill();
         }
         context.globalCompositeOperation="source-over";
-        const rgb=state.palette==="ice"?"138,197,247":"239,174,103";
+        const rgb="239,174,103";
         const halo=context.createRadialGradient(shadowX,cy,model.shadow*scale*.98,shadowX,cy,model.shadow*scale*1.25);
         halo.addColorStop(0,`rgba(${rgb},0)`);halo.addColorStop(.08,`rgba(${rgb},.4)`);halo.addColorStop(1,`rgba(${rgb},0)`);
         context.fillStyle=halo;context.fillRect(0,0,w,h);
@@ -101,7 +105,7 @@
         const tilt=state.tilt*Math.PI/180,inclination=Math.sin(tilt);
         for(let i=0;i<this.count();i++) {
           const n=i*4,r=model.isco+.025+(model.outer-model.isco-.025)*particles[n];
-          const a=particles[n+1]+state.time*physics.angularVelocity(r,model.spin)*19+state.yaw;
+          const a=particles[n+1]+state.time*physics.angularVelocity(r,model.spin)*19-viewYaw;
           const x=Math.cos(a)*r,y=Math.sin(a)*r,z=particles[n+2]*r*.024;
           const perspective=100/(100+y*Math.cos(tilt)-z*inclination);
           const px=x*perspective;
@@ -113,10 +117,12 @@
           const gravitational=Math.sqrt(Math.max(1-3/r+2*model.spin/Math.pow(r,1.5),.01))/(1+model.spin/Math.pow(r,1.5));
           const shift=Math.max(.18,Math.min(1.6,gravitational/(1+Math.sqrt(1/r)*Math.cos(tilt)*Math.cos(a))));
           const alpha=Math.min(.85,(.30+particles[n+3]*.55)*Math.pow(thermal,.8)*Math.pow(shift,3));
-          context.fillStyle=state.palette==="ice"?`rgba(138,197,247,${alpha})`:`rgba(255,${95+Math.min(1,thermal*shift)*130},${25+Math.min(1,thermal*shift)*105},${alpha})`;
+          context.fillStyle=`rgba(255,${95+Math.min(1,thermal*shift)*130},${25+Math.min(1,thermal*shift)*105},${alpha})`;
           context.beginPath();context.arc(cx+px*scale,cy-py*scale,dpr*(.55+particles[n+3]*.55),0,Math.PI*2);context.fill();
         }
         context.globalCompositeOperation="source-over";
+        // Match the reversible horizon fade used by the WebGL display pass.
+        if(flight.fade>0){context.fillStyle=`rgba(0,0,0,${flight.fade})`;context.fillRect(0,0,w,h);}
       }
     };
   }
@@ -125,15 +131,29 @@
   function resize() {
     // Preserve native 2x Retina detail instead of asking the browser to enlarge a 1.5x canvas.
     const bounds=scene.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);
-    size={width:Math.round(bounds.width*dpr),height:Math.round(bounds.height*dpr),dpr,scale:Math.min(bounds.width,bounds.height)*dpr*.028*state.zoom};
+    size={width:Math.round(bounds.width*dpr),height:Math.round(bounds.height*dpr),dpr,scale:Math.min(bounds.width,bounds.height)*dpr*.028*state.viewZoom};
     activeCanvas().width=size.width;activeCanvas().height=size.height;requestRender();
   }
   function animate(now) {
     frame=0;
     // Hidden-page suspension and bounded elapsed time avoid jumps after returning to the page.
-    if(!state.paused&&!document.hidden)state.time+=Math.min((now-lastTime)/1000,.05)*state.speed;
+    const elapsed=Math.max(0,Math.min((now-lastTime)/1000,.05));
+    if(!state.paused&&!document.hidden)state.time+=elapsed*state.speed;
+    const movingBefore=state.viewZoom!==state.zoom;
+    state.viewZoom=navigation.smoothZoom(state.viewZoom,state.zoom,elapsed,state.reducedMotion);
+    size.scale=Math.min(size.width,size.height)*.028*state.viewZoom;
+    const moving=state.viewZoom!==state.zoom;
+    if(movingBefore&&!moving)renderer.refine?.();
+    const flight=navigation.view(state.viewZoom,state.reducedMotion);
+    if(flight.stage!==flightStage){
+      flightStage=flight.stage;
+      flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
+      flightStatus.textContent=flightStage==="inside"?"已进入视界 · 缩小或按 Esc 返回":"接近视界 · 缩小可返回";
+    }
     lastTime=now;renderer.draw();
-    if(!state.paused&&!document.hidden&&!contextLost)frame=requestAnimationFrame(animate);
+    // Camera easing settles while particles are paused. Park at the opaque endpoint
+    // instead of spending GPU work on invisible particles; any input wakes the view.
+    if((moving||(!state.paused&&flight.fade<1))&&!document.hidden&&!contextLost&&!frame)frame=requestAnimationFrame(animate);
   }
   function requestRender() {
     if(frame||document.hidden||!renderer||contextLost)return;
@@ -151,11 +171,11 @@
   }
   function snapshot() {
     const model=physics.model(state);
-    return {model:state.model,spin:model.spin,isco:model.isco,tilt:state.tilt,speed:state.speed,density:renderer.count(),zoom:state.zoom,palette:state.palette,paused:state.paused,controlsExpanded:shell.open,render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
+    return {model:state.model,spin:model.spin,isco:model.isco,tilt:state.tilt,speed:state.speed,density:renderer.count(),zoom:state.zoom,flight:navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
   }
   function updateUI(message) {
     const model=physics.model(state);
-    const values={spin:model.spin.toFixed(2),tilt:`${state.tilt}°`,speed:`${state.speed.toFixed(1)} ×`,density:renderer.count().toLocaleString("zh-CN"),zoom:`${(1/state.zoom).toFixed(1)} ×`};
+    const values={spin:model.spin.toFixed(2),tilt:`${state.tilt}°`,speed:`${state.speed.toFixed(1)} ×`,density:renderer.count().toLocaleString("zh-CN"),zoom:`${state.zoom.toFixed(1)} ×`};
     Object.entries(fields).forEach(([key,element])=>{
       const value=key==="spin"?model.spin:state[key];element.value=String(value);
       element.style.setProperty("--progress",`${(value-Number(element.min))/(Number(element.max)-Number(element.min))*100}%`);
@@ -163,7 +183,7 @@
     });
     fields.spin.disabled=state.model==="schwarzschild";
     document.querySelector("#isco-value").textContent=`${model.isco.toFixed(2)} r_g`;
-    for(const key of ["model","palette"])document.querySelectorAll(`[data-${key}]`).forEach(button=>button.setAttribute("aria-pressed",String(button.dataset[key]===state[key])));
+    for(const key of ["model"])document.querySelectorAll(`[data-${key}]`).forEach(button=>button.setAttribute("aria-pressed",String(button.dataset[key]===state[key])));
     document.querySelectorAll("[data-preset]").forEach(button=>{
       const chosen=button.dataset.preset==="top"?state.tilt===78&&state.zoom===.9:state.tilt===18&&state.zoom===1;
       button.setAttribute("aria-pressed",String(chosen));
@@ -177,19 +197,18 @@
   }
   function applySettings(settings,message) {
     // Check the entire update before changing state so failed agent input is atomic.
-    const limits={spin:[0,.95],tilt:[8,85],speed:[.1,3],density:[Number(fields.density.min),Number(fields.density.max)],zoom:[.65,1.4]};
+    const limits={spin:[0,.95],tilt:[8,85],speed:[.1,3],density:[Number(fields.density.min),Number(fields.density.max)],zoom:[navigation.limits.min,navigation.limits.max]};
     for(const [key,value] of Object.entries(settings)) {
       if(Object.hasOwn(limits,key)) {
         const [min,max]=limits[key];
         if(typeof value!=="number"||!Number.isFinite(value)||value<min||value>max)throw new Error(`${key} must be between ${min} and ${max}`);
         if((key==="tilt"||key==="density")&&!Number.isInteger(value))throw new Error(`${key} must be an integer`);
       } else if(key==="model") {if(!["schwarzschild","kerr"].includes(value))throw new Error("Unsupported model");}
-      else if(key==="palette") {if(!["amber","ice"].includes(value))throw new Error("Unsupported palette");}
       else if(key==="paused") {if(typeof value!=="boolean")throw new Error("paused must be a boolean");}
       else if(key==="yaw") {if(typeof value!=="number"||!Number.isFinite(value))throw new Error("yaw must be finite");}
       else throw new Error(`Unknown parameter: ${key}`);
     }
-    Object.assign(state,settings);size.scale=Math.min(size.width,size.height)*.028*state.zoom;
+    Object.assign(state,settings);
     if(state.paused&&frame){cancelAnimationFrame(frame);frame=0;}
     updateUI(message);requestRender();return snapshot();
   }
@@ -198,12 +217,19 @@
   document.querySelectorAll("[data-preset]").forEach(button=>button.addEventListener("click",()=>{
     const top=button.dataset.preset==="top";applySettings({tilt:top?78:18,zoom:top ? .9 : 1,yaw:0},top?"已切换至俯瞰视角。":"已切换至电影视角。");
   }));
-  document.querySelectorAll("[data-palette]").forEach(button=>button.addEventListener("click",()=>applySettings({palette:button.dataset.palette},"光谱配色已更新。")));
   document.querySelector("#pause").addEventListener("click",()=>applySettings({paused:!state.paused},state.paused?"粒子继续旋转。":"画面已暂停。"));
-  document.querySelector("#reset").addEventListener("click",()=>applySettings({...defaults},"观测参数已重置。"));
+  document.querySelector("#reset").addEventListener("click",()=>{gestures.cancel();applySettings({...defaults},"观测参数已重置。");});
 
-  shell.addEventListener("toggle",()=>{toggle.title=shell.open?"收起观测控制":"展开观测控制";});
-  document.addEventListener("keydown",event=>{if(event.key==="Escape"&&shell.open){shell.open=false;toggle.focus();}});
+  shell.addEventListener("toggle",()=>{
+    toggle.title=shell.open?"收起观测控制":"展开观测控制";
+    // The view pans away from the open panel so the hole never sits behind it.
+    scene.classList.toggle("controls-open",shell.open);
+  });
+  document.addEventListener("keydown",event=>{
+    if(event.key!=="Escape")return;
+    if(shell.open){shell.open=false;toggle.focus();}
+    else if(state.zoom>navigation.limits.orbitStart){event.preventDefault();gestures.cancel();applySettings({zoom:1},"已返回远观视角。");}
+  });
   document.addEventListener("pointerdown",event=>{if(shell.open&&!shell.contains(event.target))shell.open=false;});
   const fullButton=document.querySelector("#fullscreen");
   fullButton.addEventListener("click",async()=>{
@@ -215,28 +241,19 @@
   });
   document.addEventListener("fullscreenchange",()=>{document.querySelector("#fullscreen-label").textContent=document.fullscreenElement?"退出全屏":"全屏";fullButton.setAttribute("aria-pressed",String(Boolean(document.fullscreenElement)));resize();});
   document.addEventListener("visibilitychange",()=>{if(document.hidden){if(frame)cancelAnimationFrame(frame);frame=0;}else requestRender();});
-  reducedMotion.addEventListener("change",event=>{if(event.matches)applySettings({paused:true},"已按减少动态效果偏好暂停，可点击播放继续观测。");});
+  reducedMotion.addEventListener("change",event=>{state.reducedMotion=event.matches;if(event.matches)applySettings({paused:true},"已按减少动态效果偏好暂停，可点击播放继续观测。");else requestRender();});
 
   const surface=activeCanvas();
-  let drag=null;
-  surface.addEventListener("pointerdown",event=>{
-    if(event.button!==0)return;drag={x:event.clientX,y:event.clientY,yaw:state.yaw,tilt:state.tilt};surface.setPointerCapture(event.pointerId);surface.classList.add("dragging");
-  });
-  surface.addEventListener("pointermove",event=>{
-    if(!drag)return;applySettings({yaw:drag.yaw+(event.clientX-drag.x)*.007,tilt:Math.round(Math.max(8,Math.min(85,drag.tilt+(event.clientY-drag.y)*.18)))});
-  });
-  function endDrag(){if(!drag)return;drag=null;surface.classList.remove("dragging");renderer.refine?.();}
-  for(const event of ["pointerup","pointercancel","lostpointercapture"])surface.addEventListener(event,endDrag);
-  surface.addEventListener("wheel",event=>{
-    // The canvas now owns the viewport; preserve browser pinch zoom, but use normal wheel for distance.
-    if(event.ctrlKey||event.metaKey)return;event.preventDefault();applySettings({zoom:Math.max(.65,Math.min(1.4,state.zoom-event.deltaY*.0007))});
-  },{passive:false});
+  const gestures=navigation.bind(surface,{read:()=>state,change:settings=>applySettings(settings),finish:()=>renderer.refine?.()});
+  window.addEventListener("blur",gestures.cancel);
+  window.addEventListener("pagehide",event=>{if(!event.persisted)gestures.dispose();});
   surface.addEventListener("keydown",event=>{
-    const edits={ArrowLeft:{yaw:state.yaw-.12},ArrowRight:{yaw:state.yaw+.12},ArrowUp:{tilt:Math.min(85,state.tilt+2)},ArrowDown:{tilt:Math.max(8,state.tilt-2)},"+":{zoom:Math.min(1.4,state.zoom+.05)},"=":{zoom:Math.min(1.4,state.zoom+.05)},"-":{zoom:Math.max(.65,state.zoom-.05)}," ":{paused:!state.paused}};
+    if(event.ctrlKey||event.metaKey)return;
+    const edits={ArrowLeft:{yaw:state.yaw-.12},ArrowRight:{yaw:state.yaw+.12},ArrowUp:{tilt:Math.min(85,state.tilt+2)},ArrowDown:{tilt:Math.max(8,state.tilt-2)},"+":{zoom:navigation.clampZoom(state.zoom*1.15)},"=":{zoom:navigation.clampZoom(state.zoom*1.15)},"-":{zoom:navigation.clampZoom(state.zoom/1.15)}," ":{paused:!state.paused}};
     if(!Object.hasOwn(edits,event.key))return;event.preventDefault();applySettings(edits[event.key]);
   });
   if(renderer.kind==="webgl") {
-    surface.addEventListener("webglcontextlost",event=>{event.preventDefault();contextLost=true;if(frame)cancelAnimationFrame(frame);frame=0;state.paused=true;updateUI("图形画面暂时中断，正在等待恢复。");});
+    surface.addEventListener("webglcontextlost",event=>{event.preventDefault();gestures.cancel();contextLost=true;if(frame)cancelAnimationFrame(frame);frame=0;state.paused=true;updateUI("图形画面暂时中断，正在等待恢复。");});
     surface.addEventListener("webglcontextrestored",()=>{
       try {renderer.dispose?.();const restored=createWebGLRenderer();if(!restored)throw new Error("Renderer restoration unavailable");renderer=restored;contextLost=false;updateUI("画面已恢复，点击播放继续观测。");requestRender();}
       catch {status.textContent="画面未能恢复，请刷新页面重试。";shell.open=true;}
@@ -249,7 +266,7 @@
     const lifecycle=new AbortController();
     const register=tool=>{try{Promise.resolve(modelContext.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{});}catch{/* Experimental registry support is optional. */}};
     register({name:"get_observation",title:"读取观测参数",description:"Read the black-hole model, effective spin, ISCO, rendered particle count, and collapsed control state.",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},execute(input){if(input&&Object.keys(input).length)throw new Error("No arguments accepted");return snapshot();}});
-    register({name:"configure_observation",title:"调整黑洞观测",description:"Configure the visible local particle view with Schwarzschild or Kerr parameters. Larger zoom means a closer view. Controls stay collapsed unless the user opens them.",inputSchema:{type:"object",properties:{model:{type:"string",enum:["schwarzschild","kerr"]},spin:{type:"number",minimum:0,maximum:.95},tilt:{type:"integer",minimum:8,maximum:85},speed:{type:"number",minimum:.1,maximum:3},density:{type:"integer",minimum:Number(fields.density.min),maximum:Number(fields.density.max)},zoom:{type:"number",minimum:.65,maximum:1.4},palette:{type:"string",enum:["amber","ice"]},paused:{type:"boolean"}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute(input){if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Expected an observation object");return applySettings(input,"观测参数已更新。");}});
+    register({name:"configure_observation",title:"调整黑洞观测",description:"Configure the visible local particle view with Schwarzschild or Kerr parameters. Larger zoom means a closer view. Controls stay collapsed unless the user opens them.",inputSchema:{type:"object",properties:{model:{type:"string",enum:["schwarzschild","kerr"]},spin:{type:"number",minimum:0,maximum:.95},tilt:{type:"integer",minimum:8,maximum:85},speed:{type:"number",minimum:.1,maximum:3},density:{type:"integer",minimum:Number(fields.density.min),maximum:Number(fields.density.max)},zoom:{type:"number",minimum:navigation.limits.min,maximum:navigation.limits.max},paused:{type:"boolean"}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute(input){if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Expected an observation object");return applySettings(input,"观测参数已更新。");}});
     window.addEventListener("pagehide",event=>{if(!event.persisted)lifecycle.abort();});
   }
   const observer=new ResizeObserver(resize);observer.observe(scene);
