@@ -30,6 +30,29 @@
     particles[i + 3] = random();
   }
 
+  // Fixed sky directions shared by every frame; the compatibility view basis follows yaw and tilt.
+  const sky = (() => {
+    const generator = randomGenerator(90417), stars = [], blobs = [];
+    const normal = [0.88, 0.34, 0.33], normalLength = Math.hypot(...normal), n = normal.map(v => v / normalLength);
+    let u = [-n[1], n[0], 0];
+    const uLength = Math.hypot(...u); u = u.map(v => v / uLength);
+    const v = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]];
+    const bandDirection = spread => {
+      const t = generator() * 6.28318, off = (generator() * 2 - 1) * generator() * spread;
+      const raw = [Math.cos(t) * u[0] + Math.sin(t) * v[0] + off * n[0], Math.cos(t) * u[1] + Math.sin(t) * v[1] + off * n[1], Math.cos(t) * u[2] + Math.sin(t) * v[2] + off * n[2]];
+      const length = Math.hypot(...raw);
+      return {x: raw[0] / length, y: raw[1] / length, z: raw[2] / length};
+    };
+    for (let i = 0; i < 760; i++) {
+      const z = generator() * 2 - 1, phi = generator() * 6.28318, s = Math.sqrt(1 - z * z);
+      stars.push({x: s * Math.cos(phi), y: s * Math.sin(phi), z, r: .35 + generator() ** 3 * 1.15, b: .2 + generator() * .8, warm: generator()});
+    }
+    // Milky-Way dust: dense faint stars concentrated along the tilted great circle.
+    for (let i = 0; i < 720; i++) stars.push({...bandDirection(.32), r: .3 + generator() * .5, b: .06 + generator() * .22, warm: generator()});
+    for (let i = 0; i < 26; i++) blobs.push({...bandDirection(.22), radius: .1 + generator() * .12, alpha: .014 + generator() * .03, blue: generator() < .7});
+    return {stars, blobs};
+  })();
+
   // Trace geometry only when camera/model parameters change; resolve animated light every frame.
   function createWebGLRenderer() {
     const engine=globalThis.BlackHoleRaytracer.create({canvas,particles,state,physics,onNeedsFrame:requestRender});
@@ -48,6 +71,26 @@
         const cx=w*.5,cy=h*.5,shadowX=cx+model.offset*scale;
         if(!profile||profile.spin!==model.spin)profile={...physics.diskProfile(model.spin,model.outer),spin:model.spin};
         context.fillStyle="#08090d";context.fillRect(0,0,w,h);
+        // Sky first: stars and the Milky-Way band sit behind halo, shadow and disk.
+        const tiltAngle=state.tilt*Math.PI/180,cosYaw=Math.cos(state.yaw),sinYaw=Math.sin(state.yaw);
+        const forwardY=Math.cos(tiltAngle),forwardZ=-Math.sin(tiltAngle),upY=Math.sin(tiltAngle),upZ=Math.cos(tiltAngle);
+        const focal=h/((h/scale)*.5/80)*.5;
+        context.globalCompositeOperation="lighter";
+        for(const blob of sky.blobs) {
+          const rx=blob.x*cosYaw-blob.y*sinYaw,ry=blob.x*sinYaw+blob.y*cosYaw,depth=ry*forwardY+blob.z*forwardZ;
+          if(depth<.3)continue;
+          const px=cx+rx/depth*focal,py=cy-(ry*upY+blob.z*upZ)/depth*focal,radius=blob.radius*focal,rgb=blob.blue?"96,132,200":"190,140,100";
+          const glow=context.createRadialGradient(px,py,0,px,py,radius);
+          glow.addColorStop(0,`rgba(${rgb},${blob.alpha})`);glow.addColorStop(1,`rgba(${rgb},0)`);
+          context.fillStyle=glow;context.fillRect(px-radius,py-radius,radius*2,radius*2);
+        }
+        for(const star of sky.stars) {
+          const rx=star.x*cosYaw-star.y*sinYaw,ry=star.x*sinYaw+star.y*cosYaw,depth=ry*forwardY+star.z*forwardZ;
+          if(depth<.3)continue;
+          context.fillStyle=star.warm>.6?`rgba(255,240,220,${star.b})`:`rgba(208,222,255,${star.b})`;
+          context.beginPath();context.arc(cx+rx/depth*focal,cy-(ry*upY+star.z*upZ)/depth*focal,star.r*dpr,0,Math.PI*2);context.fill();
+        }
+        context.globalCompositeOperation="source-over";
         const rgb=state.palette==="ice"?"138,197,247":"239,174,103";
         const halo=context.createRadialGradient(shadowX,cy,model.shadow*scale*.98,shadowX,cy,model.shadow*scale*1.25);
         halo.addColorStop(0,`rgba(${rgb},0)`);halo.addColorStop(.08,`rgba(${rgb},.4)`);halo.addColorStop(1,`rgba(${rgb},0)`);
@@ -79,7 +122,8 @@
 
   function activeCanvas(){return renderer?.canvas || canvas;}
   function resize() {
-    const bounds=scene.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,1.5);
+    // Preserve native 2x Retina detail instead of asking the browser to enlarge a 1.5x canvas.
+    const bounds=scene.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);
     size={width:Math.round(bounds.width*dpr),height:Math.round(bounds.height*dpr),dpr,scale:Math.min(bounds.width,bounds.height)*dpr*.028*state.zoom};
     activeCanvas().width=size.width;activeCanvas().height=size.height;requestRender();
   }
@@ -180,7 +224,7 @@
   surface.addEventListener("pointermove",event=>{
     if(!drag)return;applySettings({yaw:drag.yaw+(event.clientX-drag.x)*.007,tilt:Math.round(Math.max(8,Math.min(85,drag.tilt+(event.clientY-drag.y)*.18)))});
   });
-  function endDrag(){drag=null;surface.classList.remove("dragging");}
+  function endDrag(){if(!drag)return;drag=null;surface.classList.remove("dragging");renderer.refine?.();}
   for(const event of ["pointerup","pointercancel","lostpointercapture"])surface.addEventListener(event,endDrag);
   surface.addEventListener("wheel",event=>{
     // The canvas now owns the viewport; preserve browser pinch zoom, but use normal wheel for distance.

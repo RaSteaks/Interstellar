@@ -5,7 +5,7 @@
     const gl=canvas.getContext("webgl2",{alpha:false,antialias:false,powerPreference:"high-performance"});
     if(!gl||!gl.getExtension("EXT_color_buffer_float"))return null;
     const geodesics=globalThis.BlackHoleGeodesics;
-    const metrics={mode:"webgl2-kerr-raytrace",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceSubmitMs:0};
+    const metrics={mode:"webgl2-kerr-raytrace",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceSubmitMs:0,traceQuality:"interactive",traceBudget:0,canvasWidth:0,canvasHeight:0,imageWidth:0,imageHeight:0,refinementRequests:0};
     const vertex=`#version 300 es
       layout(location=0) in vec2 aPosition;
       out vec2 vUv;
@@ -17,6 +17,7 @@
       in vec2 vUv;
       layout(location=0) out vec4 firstHit;
       layout(location=1) out vec4 secondHit;
+      layout(location=2) out vec4 skyHit;
       uniform vec2 uExtent;
       uniform vec3 uOrigin;
       uniform vec4 uObserver,uRight,uUp,uForward;
@@ -35,6 +36,8 @@
       }
       void main() {
         firstHit=vec4(-1.,0.,0.,1.);secondHit=firstHit;
+        // Escaping rays carry their asymptotic direction so the sky is sampled where the light came from.
+        skyHit=vec4(0.,0.,0.,0.);
         vec2 impact=(vUv-.5)*uExtent;
         vec3 direction=normalize(vec3(impact/uDistance,1.));
         vec4 velocity=-uObserver+direction.x*uRight+direction.y*uUp+direction.z*uForward;
@@ -44,10 +47,12 @@
         vec3 x=uOrigin,p=momentum.xyz;
         float energy=momentum.w;
         int hits=0;
+        bool escaped=false;
         for(int i=0;i<384;i++) {
           if(i>=uSteps)break;
           Geometry geo=metric(x,uSpin);
-          if(geo.r<=uHorizon*1.003||geo.r>95.)break;
+          if(geo.r<=uHorizon*1.003)break;
+          if(geo.r>95.){escaped=true;break;}
           float h=min(min(3.5,max(.008,geo.r*uStepScale)),.012+.14*max(0.,geo.r-uHorizon));
           vec3 oldX=x,oldP=p;
           rk4(x,p,energy,uSpin,h);
@@ -66,6 +71,7 @@
             }
           }
         }
+        if(escaped)skyHit=vec4(normalize(p),1.);
       }
     `;
     const atlasVertex=`#version 300 es
@@ -94,14 +100,45 @@
       precision highp int;
       in vec2 vUv;
       out vec4 color;
-      uniform sampler2D uFirst,uSecond,uAtlas,uFlux;
+      uniform sampler2D uFirst,uSecond,uAtlas,uFlux,uSky;
       uniform float uInner,uOuter,uPalette;
+      float hash13(vec3 p){p=fract(p*.1031);p+=dot(p,p.zyx+31.32);return fract((p.x+p.y)*p.z);}
+      vec3 hash33(vec3 p){p=fract(p*vec3(.1031,.1030,.0973));p+=dot(p,p.yxz+33.33);return fract((p.xxy+p.yxx)*p.zyx);}
+      float vnoise(vec3 p){
+        vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+        return mix(mix(mix(hash13(i),hash13(i+vec3(1.,0.,0.)),f.x),mix(hash13(i+vec3(0.,1.,0.)),hash13(i+vec3(1.,1.,0.)),f.x),f.y),
+                   mix(mix(hash13(i+vec3(0.,0.,1.)),hash13(i+vec3(1.,0.,1.)),f.x),mix(hash13(i+vec3(0.,1.,1.)),hash13(i+vec3(1.,1.,1.)),f.x),f.y),f.z);
+      }
       vec3 spectrum(float temperature) {
         float t=clamp(temperature,0.,1.6);
         vec3 warm=mix(vec3(.62,.045,.006),vec3(1.,.48,.12),smoothstep(.18,.72,t));
         warm=mix(warm,vec3(1.,.92,.76),smoothstep(.72,1.30,t));
         vec3 cool=mix(vec3(.04,.16,.37),vec3(.56,.85,1.),smoothstep(.15,1.10,t));
         return mix(warm,cool,uPalette);
+      }
+      // Star cells on the direction sphere: each cell lights one gaussian star, rarity skews magnitudes.
+      vec3 starLayer(vec3 dir,float scale,float rarity,float sharpness,float weight,float bandBoost,vec3 bandNormal) {
+        vec3 cell=floor(dir*scale);
+        vec3 random=hash33(cell+vec3(scale*.017));
+        // Radial projection puts the star on the sphere, so every cell renders; d2 is squared angular distance.
+        vec3 star=normalize(cell+.2+.6*random);
+        float magnitude=hash13(cell+vec3(rarity*.031));
+        float band=exp(-pow(dot(dir,bandNormal)*3.4,2.));
+        vec3 tint=mix(vec3(.66,.76,1.),vec3(1.,.82,.62),random.x);
+        return tint*(exp(-dot(dir-star,dir-star)*sharpness)*pow(magnitude,rarity)*weight*(.3+band*bandBoost));
+      }
+      // Sky sampled with the escaped ray direction, so lensing bends star positions for free.
+      vec3 skyColor(vec3 dir) {
+        vec3 bandNormal=normalize(vec3(.88,.34,.33));
+        // A narrow Milky-Way band leaves most of the sky near the deep-space base color.
+        float band=exp(-pow(dot(dir,bandNormal)*3.4,2.));
+        float large=vnoise(dir*2.6),fine=vnoise(dir*6.3+9.4);
+        vec3 sky=vec3(.0032,.0044,.0082);
+        sky+=band*(.5+.5*fine)*mix(vec3(.07,.10,.185),vec3(.15,.10,.07),large)*(.42+.6*large);
+        sky+=starLayer(dir,17.,15.,870000.,1.1,.8,bandNormal);
+        sky+=starLayer(dir,38.,22.,1600000.,.5,1.8,bandNormal);
+        sky+=starLayer(dir,62.,30.,2100000.,.32,2.6,bandNormal);
+        return sky;
       }
       vec4 emission(vec4 hit) {
         if(hit.x<=uInner||hit.x>=uOuter)return vec4(0.);
@@ -118,20 +155,25 @@
         float brightness=flux*g*g*g*g*(.35+.85*sqrt(grain+.02));
         return vec4(spectrum(temperature)*brightness*opacity,opacity);
       }
-      vec3 resolve(ivec2 coordinate) {
+      vec4 shade(ivec2 coordinate) {
         ivec2 dimensions=textureSize(uFirst,0);
         coordinate=clamp(coordinate,ivec2(0),dimensions-1);
         vec4 front=emission(texelFetch(uFirst,coordinate,0));
         vec4 back=emission(texelFetch(uSecond,coordinate,0));
-        return front.rgb+(1.-front.a)*back.rgb;
+        // Alpha carries the joint transmittance so the sky shows through thin disk regions.
+        return vec4(front.rgb+(1.-front.a)*back.rgb,(1.-front.a)*(1.-back.a));
       }
       void main() {
         vec2 pixel=vUv*vec2(textureSize(uFirst,0))-.5;
         ivec2 base=ivec2(floor(pixel));vec2 f=fract(pixel);
         // Interpolate resolved light, rather than polar coordinates across the phi seam or shadow.
-        vec3 a=mix(resolve(base),resolve(base+ivec2(1,0)),f.x);
-        vec3 b=mix(resolve(base+ivec2(0,1)),resolve(base+ivec2(1,1)),f.x);
-        color=vec4(mix(a,b,f.y),1.);
+        vec4 a=mix(shade(base),shade(base+ivec2(1,0)),f.x);
+        vec4 b=mix(shade(base+ivec2(0,1)),shade(base+ivec2(1,1)),f.x);
+        vec4 light=mix(a,b,f.y);
+        vec4 escape=texture(uSky,vUv);
+        float open=smoothstep(.25,.75,escape.w);
+        vec3 direction=escape.xyz/max(length(escape.xyz),1e-3);
+        color=vec4(light.rgb+light.a*open*skyColor(direction),1.);
       }
     `;
     const displayFragment=`#version 300 es
@@ -146,7 +188,8 @@
         vec3 bloom=(bright(vUv+uTexel*vec2(3.,0.))+bright(vUv-uTexel*vec2(3.,0.))
                    +bright(vUv+uTexel*vec2(0.,3.))+bright(vUv-uTexel*vec2(0.,3.)))*.08;
         vec3 mapped=vec3(1.)-exp(-(light+bloom)*2.4);
-        color=vec4(pow(mapped,vec3(.72))+vec3(.012,.014,.018),1.);
+        // No base lift: the shadow stays truly black so it reads against the lensed sky.
+        color=vec4(pow(mapped,vec3(.72)),1.);
       }
     `;
 
@@ -165,7 +208,7 @@
     }
     const traceProgram=program(vertex,traceFragment,["uExtent","uOrigin","uObserver","uRight","uUp","uForward","uDistance","uSpin","uHorizon","uInner","uOuter","uStepScale","uSteps"]);
     const atlasProgram=program(atlasVertex,atlasFragment,["uInner","uOuter","uSpin","uTime","uYaw"]);
-    const emitProgram=program(vertex,emitFragment,["uFirst","uSecond","uAtlas","uFlux","uInner","uOuter","uPalette"]);
+    const emitProgram=program(vertex,emitFragment,["uFirst","uSecond","uAtlas","uFlux","uSky","uInner","uOuter","uPalette"]);
     const displayProgram=program(vertex,displayFragment,["uImage","uTexel"]);
     const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);objects.push(["buffer",quad]);
     const seeds=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,seeds);gl.bufferData(gl.ARRAY_BUFFER,particles,gl.STATIC_DRAW);objects.push(["buffer",seeds]);
@@ -191,8 +234,14 @@
     }
     const atlas=target(1028,512);
     const fluxTexture=texture(256,1);
-    let map=null,image=null,geometryKey="",profileKey="",refined=false,refineAt=0,timer=0,disposed=false;
+    let map=null,image=null,geometryKey="",profileKey="",refined=false,refineAt=0,timer=0,disposed=false,forceRefinement=false;
     let viewport={width:1,height:1,scale:1};
+    const maxTargetSize=Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE),gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+    function imageDimensions(size) {
+      // Keep Retina detail through composition, while bounding per-frame work and texture limits.
+      const scale=Math.min(1,2560/size.width,1440/size.height,maxTargetSize/size.width,maxTargetSize/size.height);
+      return {width:Math.max(1,Math.round(size.width*scale)),height:Math.max(1,Math.round(size.height*scale))};
+    }
     function bindQuad(program) {
       gl.useProgram(program.item);gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
     }
@@ -207,10 +256,12 @@
     }
     function traceMap(model,high) {
       const started=performance.now(),aspect=viewport.width/viewport.height;
-      // Refine the reusable map for sharper photon images, keeping drag updates inexpensive.
-      const budget=high?300000:40000;
-      const height=Math.max(64,Math.floor(Math.sqrt(budget/aspect))),width=Math.max(64,Math.floor(height*aspect));
-      if(!map||map.width!==width||map.height!==height){discard(map);map=target(width,height,2,gl.NEAREST);}
+      // A small viewport never traces more samples than its actual composed image can display.
+      const output=imageDimensions(viewport),budget=Math.min(high?1200000:160000,output.width*output.height);
+      let height=Math.max(64,Math.floor(Math.sqrt(budget/aspect))),width=Math.max(64,Math.floor(height*aspect));
+      const fit=Math.min(1,maxTargetSize/width,maxTargetSize/height);
+      width=Math.max(1,Math.floor(width*fit));height=Math.max(1,Math.floor(height*fit));
+      if(!map||map.width!==width||map.height!==height){discard(map);map=target(width,height,3,gl.LINEAR);}
       gl.bindFramebuffer(gl.FRAMEBUFFER,map.framebuffer);gl.viewport(0,0,width,height);gl.disable(gl.BLEND);bindQuad(traceProgram);
       const camera=geodesics.observer(model.spin,state.tilt),u=traceProgram.uniform;
       gl.uniform2f(u.uExtent,viewport.width/viewport.scale,viewport.height/viewport.scale);
@@ -219,22 +270,25 @@
       for(const [key,value] of Object.entries({uDistance:camera.distance,uSpin:model.spin,uHorizon:model.horizon,uInner:model.isco,uOuter:model.outer,uStepScale:high ? .065 : .11}))gl.uniform1f(u[key],value);
       gl.uniform1i(u.uSteps,high?320:224);gl.drawArrays(gl.TRIANGLES,0,6);
       metrics.geodesicBuilds++;metrics.traceWidth=width;metrics.traceHeight=height;metrics.traceSubmitMs=performance.now()-started;
+      metrics.traceQuality=high?"refined":"interactive";metrics.traceBudget=budget;
     }
     function ensureGeometry(model) {
       const key=[model.spin,state.tilt,state.zoom,viewport.width,viewport.height,model.isco,model.outer].join(":");
       if(key!==geometryKey) {
-        geometryKey=key;refined=false;refineAt=performance.now()+140;
-        clearTimeout(timer);traceMap(model,false);
-        // One delayed refinement also works while playback is paused.
-        timer=setTimeout(()=>{if(!disposed)onNeedsFrame();},150);
-      } else if(!refined&&performance.now()>=refineAt) {traceMap(model,true);refined=true;}
+        geometryKey=key;refined=forceRefinement;
+        clearTimeout(timer);traceMap(model,refined);refineAt=performance.now()+140;
+        // Drag release can bypass the coarse pass, including while playback is paused.
+        if(!refined)timer=setTimeout(()=>{if(!disposed)onNeedsFrame();},150);
+      } else if(!refined&&(forceRefinement||performance.now()>=refineAt)) {traceMap(model,true);refined=true;}
+      forceRefinement=false;
     }
     return {
       kind:"webgl",count:()=>state.density,metrics,
       draw(size) {
         if(disposed)return;
         viewport=size;const model=physics.model(state);updateProfile(model);ensureGeometry(model);
-        const scale=Math.min(1,1280/size.width,900/size.height),width=Math.max(1,Math.round(size.width*scale)),height=Math.max(1,Math.round(size.height*scale));
+        const {width,height}=imageDimensions(size);
+        metrics.canvasWidth=size.width;metrics.canvasHeight=size.height;metrics.imageWidth=width;metrics.imageHeight=height;
         if(!image||image.width!==width||image.height!==height){discard(image);image=target(width,height);}
         gl.bindFramebuffer(gl.FRAMEBUFFER,atlas.framebuffer);gl.viewport(0,0,atlas.width,atlas.height);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);
         gl.useProgram(atlasProgram.item);gl.bindBuffer(gl.ARRAY_BUFFER,seeds);gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,4,gl.FLOAT,false,0,0);
@@ -243,10 +297,14 @@
         // Seam replicas are the same source particles, not extra particles in the UI count.
         gl.drawArraysInstanced(gl.POINTS,0,state.density,3);gl.disable(gl.BLEND);
         gl.bindFramebuffer(gl.FRAMEBUFFER,image.framebuffer);gl.viewport(0,0,width,height);bindQuad(emitProgram);
-        sampler(emitProgram,"uFirst",0,map.images[0]);sampler(emitProgram,"uSecond",1,map.images[1]);sampler(emitProgram,"uAtlas",2,atlas.images[0]);sampler(emitProgram,"uFlux",3,fluxTexture);
+        sampler(emitProgram,"uFirst",0,map.images[0]);sampler(emitProgram,"uSecond",1,map.images[1]);sampler(emitProgram,"uAtlas",2,atlas.images[0]);sampler(emitProgram,"uFlux",3,fluxTexture);sampler(emitProgram,"uSky",4,map.images[2]);
         gl.uniform1f(emitProgram.uniform.uInner,model.isco);gl.uniform1f(emitProgram.uniform.uOuter,model.outer);gl.uniform1f(emitProgram.uniform.uPalette,state.palette==="ice"?1:0);gl.drawArrays(gl.TRIANGLES,0,6);
         gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);bindQuad(displayProgram);sampler(displayProgram,"uImage",0,image.images[0]);gl.uniform2f(displayProgram.uniform.uTexel,1/width,1/height);gl.drawArrays(gl.TRIANGLES,0,6);
         metrics.frames++;
+      },
+      refine() {
+        if(disposed)return;
+        clearTimeout(timer);forceRefinement=true;metrics.refinementRequests++;onNeedsFrame();
       },
       dispose() {
         disposed=true;clearTimeout(timer);
