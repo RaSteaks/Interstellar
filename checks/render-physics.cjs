@@ -49,4 +49,37 @@ const inside=g.trace(camera,critical-.03,0,6,26,{stepScale:.05,steps:384});
 const outside=g.trace(camera,critical+.03,0,6,26,{stepScale:.05,steps:384});
 assert.ok(inside.captured && outside.escaped);
 assert.ok(g.trace(camera,0,0,6,26).captured);
-console.log('PASS: 96 disk profiles, observer tetrads, null initial rays, Hamiltonian gradients, conserved escaping rays and Schwarzschild capture boundary.');
+
+// Disk-plane crossings stay within the captured pair: rays near the photon sphere
+// cross the equator inside the ISCO hole, so the two-hit GPU cache loses no disk image
+// (Gralla, Holz & Wald 2019 higher-order rings carry no disk light in this geometry).
+for(const b of [critical+.005,critical+.05,5.5,6,7.5,9,12,16,20,24]){
+ const traced=g.trace(camera,b,0,6,26,{stepScale:.02,steps:900});
+ assert.ok(traced.hits.length<=2,`crossings within the disk must stay <=2 at b=${b}`);
+}
+
+// Doppler beaming asymmetry: mirrored rays must show the prograde side blueshifted
+// (g>1) and the receding side redshifted (g<1) relative to each other.
+const pair=g.trace(camera,-9,0,6,26,{stepScale:.03,steps:600}),mirror=g.trace(camera,9,0,6,26,{stepScale:.03,steps:600});
+assert.ok(pair.hits.length>0 && mirror.hits.length>0);
+assert.ok(Math.max(...pair.hits.map(h=>h.shift))>Math.max(...mirror.hits.map(h=>h.shift)));
+
+// Shaders carry no compiler in node: assert structural validity and that every
+// uniform name wired in raytracer.js is declared in some shader stage.
+const raytracer=fs.readFileSync(path.join(__dirname,'../dist/raytracer.js'),'utf8');
+const stages=[...raytracer.matchAll(/`#version 300 es[^`]*`/g)].map(match=>match[0]);
+assert.equal(stages.length,6);
+for(const stage of stages){
+ for(const pairName of ['{}','()']){
+  const [open,close]=pairName;let depth=0;
+  for(const char of stage){
+   if(char===open)depth++;else if(char===close)depth--;
+   assert.ok(depth>=0,'unbalanced shader nesting');
+  }
+  assert.equal(depth,0,'unbalanced shader nesting');
+ }
+}
+for(const name of raytracer.matchAll(/program\([^,]+,[^,]+,\[([^\]]*)\]/g)){
+ for(const uniform of name[1].matchAll(/"([^"]+)"/g))assert.ok(raytracer.includes(`uniform ${/\b(u[A-Z])/.test(uniform[1])?'':'sampler2D '}${uniform[1]}`)||new RegExp(`uniform [\\w\\s,]*\\b${uniform[1]}\\b`).test(raytracer),`undeclared uniform ${uniform[1]}`);
+}
+console.log('PASS: 96 disk profiles, observer tetrads, null initial rays, Hamiltonian gradients, conserved escaping rays, Schwarzschild capture boundary, two-crossing disk cache, Doppler asymmetry and shader structure.');

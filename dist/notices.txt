@@ -13,6 +13,24 @@ Please cite: Dexter (2016), arXiv:1602.03184; Dexter & Agol (2009), arXiv:0903.0
 This site does not include the grtrans Fortran runtime, geokerr elliptic
 integrator, full polarized transfer solver, or GRMHD simulation data.
 
+Further reading for the visual model (inspected for method; no source code
+included in this distribution):
+- James, von Tunzelmann, Franklin & Thorne (2015), Class. Quantum Grav. 32
+  065001, arXiv:1502.03808 - DNGR ray-bundle rendering of spinning black holes.
+- Gralla, Holz & Wald (2019), Phys. Rev. D 100, 024018, arXiv:1906.00873 -
+  shadow, lensing ring and photon ring image decomposition.
+- Bruneton (2020), arXiv:2010.08737 - real-time shader via precomputed
+  deflection tables; alternative performance route.
+- Luminet (1979), Astronomy & Astrophysics 75, 228 - first computed image of
+  a spherical black hole with a thin accretion disk.
+- Event Horizon Telescope Collaboration (2019), ApJL 875 L1 (Paper VI) -
+  observed ring asymmetry from relativistic Doppler beaming.
+- oseiskar/black-hole (GPL) and rantonels/starless (MIT) - background lensing
+  and multiple star-image presentation references; physics write-up at
+  https://oseiskar.github.io/black-hole/docs/physics.html
+
+A full per-effect derivation trail lives in PHYSICS.md at the repository root.
+
 The applicable grtrans MIT notice follows:
 
 MIT License

@@ -93,7 +93,9 @@
       precision highp float;
       in float vWeight;
       out vec4 color;
-      void main(){vec2 p=gl_PointCoord-.5;float value=exp(-dot(p,p)*20.)*vWeight;color=vec4(value);}
+      // Kernels stretch along the orbital direction: Keplerian shear advects the
+      // grain into filaments over time, so the disk reads as streaks instead of fog.
+      void main(){vec2 p=gl_PointCoord-.5;p.x*=.55;float value=exp(-dot(p,p)*20.)*vWeight*.8;color=vec4(value);}
     `;
     const emitFragment=`#version 300 es
       precision highp float;
@@ -123,7 +125,7 @@
         // Radial projection puts the star on the sphere, so every cell renders; d2 is squared angular distance.
         vec3 star=normalize(cell+.2+.6*random);
         float magnitude=hash13(cell+vec3(rarity*.031));
-        float band=exp(-pow(dot(dir,bandNormal)*3.4,2.));
+        float band=exp(-pow(dot(dir,bandNormal)*4.8,2.));
         vec3 tint=mix(vec3(.66,.76,1.),vec3(1.,.82,.62),random.x);
         return tint*(exp(-dot(dir-star,dir-star)*sharpness)*pow(magnitude,rarity)*weight*(.3+band*bandBoost));
       }
@@ -131,10 +133,11 @@
       vec3 skyColor(vec3 dir) {
         vec3 bandNormal=normalize(vec3(.88,.34,.33));
         // A narrow Milky-Way band leaves most of the sky near the deep-space base color.
-        float band=exp(-pow(dot(dir,bandNormal)*3.4,2.));
+        float band=exp(-pow(dot(dir,bandNormal)*4.8,2.));
         float large=vnoise(dir*2.6),fine=vnoise(dir*6.3+9.4);
         vec3 sky=vec3(.0032,.0044,.0082);
-        sky+=band*(.5+.5*fine)*mix(vec3(.07,.10,.185),vec3(.15,.10,.07),large)*(.42+.6*large);
+        // Band glow sits well below the disk peak so deep space stays near-black around the hole.
+        sky+=band*(.5+.5*fine)*mix(vec3(.055,.078,.144),vec3(.117,.078,.055),large)*(.42+.6*large);
         sky+=starLayer(dir,17.,15.,870000.,1.1,.8,bandNormal);
         sky+=starLayer(dir,38.,22.,1600000.,.5,1.8,bandNormal);
         sky+=starLayer(dir,62.,30.,2100000.,.32,2.6,bandNormal);
@@ -147,12 +150,15 @@
         float flux=texture(uFlux,vec2(textureRadius,.5)).r;
         float atlasAngle=(fract(hit.y/6.28318530718+.5)*1024.+2.)/1028.;
         float grain=texture(uAtlas,vec2(atlasAngle,q)).r;
-        float coverage=.12+.55*grain;
+        // The outer rim dissolves over the last ~12% of radius instead of clipping,
+        // so the disk meets the sky through a gradient rather than a hard cut.
+        float edge=smoothstep(1.,.88,q);
+        float coverage=(.12+.55*grain)*edge;
         float opacity=1.-exp(-coverage*.65/max(hit.w,.075));
         float g=clamp(hit.z,.025,4.);
         float temperature=pow(max(flux,0.),.25)*g;
         // I_nu/nu^3 is invariant; the bolometric blackbody intensity scales as g^4.
-        float brightness=flux*g*g*g*g*(.35+.85*sqrt(grain+.02));
+        float brightness=flux*g*g*g*g*(.35+.85*sqrt(grain+.02))*edge;
         return vec4(spectrum(temperature)*brightness*opacity,opacity);
       }
       vec4 shade(ivec2 coordinate) {
@@ -171,7 +177,8 @@
         vec4 b=mix(shade(base+ivec2(0,1)),shade(base+ivec2(1,1)),f.x);
         vec4 light=mix(a,b,f.y);
         vec4 escape=texture(uSky,vUv);
-        float open=smoothstep(.25,.75,escape.w);
+        // Use the full bilinear ramp of the escape flag so the silhouette keeps a soft antialiased edge.
+        float open=smoothstep(.02,.98,escape.w);
         vec3 direction=escape.xyz/max(length(escape.xyz),1e-3);
         color=vec4(light.rgb+light.a*open*skyColor(direction),1.);
       }
@@ -182,12 +189,18 @@
       out vec4 color;
       uniform sampler2D uImage;
       uniform vec2 uTexel;
-      vec3 bright(vec2 uv){vec3 c=texture(uImage,uv).rgb;return max(c-vec3(.6),vec3(0.));}
+      vec3 bright(vec2 uv,float threshold){vec3 c=texture(uImage,uv).rgb;return max(c-vec3(threshold),vec3(0.));}
       void main() {
         vec3 light=texture(uImage,vUv).rgb;
-        vec3 bloom=(bright(vUv+uTexel*vec2(3.,0.))+bright(vUv-uTexel*vec2(3.,0.))
-                   +bright(vUv+uTexel*vec2(0.,3.))+bright(vUv-uTexel*vec2(0.,3.)))*.08;
-        vec3 mapped=vec3(1.)-exp(-(light+bloom)*2.4);
+        // Two-scale bloom: the tight core keeps the photon ring crisp, the wide halo
+        // melts ring and disk rim into the sky so the silhouette reads soft.
+        vec3 bloom=(bright(vUv+uTexel*vec2(3.,0.),.6)+bright(vUv-uTexel*vec2(3.,0.),.6)
+                   +bright(vUv+uTexel*vec2(0.,3.),.6)+bright(vUv-uTexel*vec2(0.,3.),.6))*.08;
+        vec3 halo=(bright(vUv+uTexel*vec2(9.,0.),.3)+bright(vUv-uTexel*vec2(9.,0.),.3)
+                  +bright(vUv+uTexel*vec2(0.,9.),.3)+bright(vUv-uTexel*vec2(0.,9.),.3)
+                  +bright(vUv+uTexel*vec2(7.,7.),.3)+bright(vUv-uTexel*vec2(7.,7.),.3)
+                  +bright(vUv+uTexel*vec2(7.,-7.),.3)+bright(vUv-uTexel*vec2(7.,-7.),.3))*.028;
+        vec3 mapped=vec3(1.)-exp(-(light+bloom+halo)*2.4);
         // No base lift: the shadow stays truly black so it reads against the lensed sky.
         color=vec4(pow(mapped,vec3(.72)),1.);
       }
