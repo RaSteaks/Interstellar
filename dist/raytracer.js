@@ -6,7 +6,7 @@
     if(!gl||!gl.getExtension("EXT_color_buffer_float"))return null;
     const geodesics=globalThis.BlackHoleGeodesics;
     const navigation=globalThis.BlackHoleNavigation;
-    const metrics={mode:"webgl2-kerr-raytrace",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceSubmitMs:0,traceQuality:"interactive",traceBudget:0,canvasWidth:0,canvasHeight:0,imageWidth:0,imageHeight:0,refinementRequests:0,observerDistance:80,orbitAngle:0,horizonFade:0};
+    const metrics={mode:"webgl2-kerr-raytrace",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceSubmitMs:0,traceQuality:"interactive",traceBudget:0,canvasWidth:0,canvasHeight:0,imageWidth:0,imageHeight:0,refinementRequests:0,observerDistance:80,orbitAngle:0,horizonFade:0,frameMs:0,interactiveBudget:240000,centerPixels:0};
     const vertex=`#version 300 es
       layout(location=0) in vec2 aPosition;
       out vec2 vUv;
@@ -20,6 +20,8 @@
       layout(location=1) out vec4 secondHit;
       layout(location=2) out vec4 skyHit;
       uniform vec2 uExtent;
+      // Foveal refinement remaps the shared pinhole camera onto a screen-center sub-rectangle.
+      uniform vec2 uUvOffset,uUvScale;
       uniform vec3 uOrigin;
       uniform vec4 uObserver,uRight,uUp,uForward;
       uniform float uDistance,uSpin,uHorizon,uInner,uOuter,uStepScale;
@@ -39,7 +41,7 @@
         firstHit=vec4(-1.,0.,0.,1.);secondHit=firstHit;
         // Escaping rays carry their asymptotic direction so the sky is sampled where the light came from.
         skyHit=vec4(0.,0.,0.,0.);
-        vec2 impact=(vUv-.5)*uExtent;
+        vec2 impact=(uUvOffset+vUv*uUvScale-.5)*uExtent;
         vec3 direction=normalize(vec3(impact/uDistance,1.));
         vec4 velocity=-uObserver+direction.x*uRight+direction.y*uUp+direction.z*uForward;
         Geometry initial=metric(uOrigin,uSpin);
@@ -106,7 +108,10 @@
       in vec2 vUv;
       out vec4 color;
       uniform sampler2D uFirst,uSecond,uAtlas,uFlux,uSky;
-      uniform float uInner,uOuter,uViewYaw;
+      // Foveal overlay: the screen-center rectangle the refined pass retraced; zero mix disables it.
+      uniform sampler2D uCenterFirst,uCenterSecond,uCenterSky;
+      uniform vec2 uUvOffset,uUvScale;
+      uniform float uInner,uOuter,uViewYaw,uCenterMix;
       float hash13(vec3 p){p=fract(p*.1031);p+=dot(p,p.zyx+31.32);return fract((p.x+p.y)*p.z);}
       vec3 hash33(vec3 p){p=fract(p*vec3(.1031,.1030,.0973));p+=dot(p,p.yxz+33.33);return fract((p.xxy+p.yxx)*p.zyx);}
       float vnoise(vec3 p){
@@ -171,22 +176,33 @@
         float brightness=flux*g*g*g*g*(.35+.85*sqrt(grain+.02))*edge;
         return vec4(spectrum(temperature)*brightness*opacity,opacity);
       }
-      vec4 shade(ivec2 coordinate) {
-        ivec2 dimensions=textureSize(uFirst,0);
+      vec4 shade(ivec2 coordinate,sampler2D first,sampler2D second) {
+        ivec2 dimensions=textureSize(first,0);
         coordinate=clamp(coordinate,ivec2(0),dimensions-1);
-        vec4 front=emission(texelFetch(uFirst,coordinate,0));
-        vec4 back=emission(texelFetch(uSecond,coordinate,0));
+        vec4 front=emission(texelFetch(first,coordinate,0));
+        vec4 back=emission(texelFetch(second,coordinate,0));
         // Alpha carries the joint transmittance so the sky shows through thin disk regions.
         return vec4(front.rgb+(1.-front.a)*back.rgb,(1.-front.a)*(1.-back.a));
       }
-      void main() {
-        vec2 pixel=vUv*vec2(textureSize(uFirst,0))-.5;
+      vec4 resolve(vec2 uv,sampler2D first,sampler2D second) {
+        vec2 pixel=uv*vec2(textureSize(first,0))-.5;
         ivec2 base=ivec2(floor(pixel));vec2 f=fract(pixel);
         // Interpolate resolved light, rather than polar coordinates across the phi seam or shadow.
-        vec4 a=mix(shade(base),shade(base+ivec2(1,0)),f.x);
-        vec4 b=mix(shade(base+ivec2(0,1)),shade(base+ivec2(1,1)),f.x);
-        vec4 light=mix(a,b,f.y);
+        vec4 a=mix(shade(base,first,second),shade(base+ivec2(1,0),first,second),f.x);
+        vec4 b=mix(shade(base+ivec2(0,1),first,second),shade(base+ivec2(1,1),first,second),f.x);
+        return mix(a,b,f.y);
+      }
+      void main() {
+        vec4 light=resolve(vUv,uFirst,uSecond);
         vec4 escape=texture(uSky,vUv);
+        if(uCenterMix>0.) {
+          // Blend the refined foveal rectangle over the coarse map across a feathered seam.
+          vec2 focus=(vUv-uUvOffset)/uUvScale;
+          vec2 edge=smoothstep(vec2(0.),vec2(.03),focus)*(1.-smoothstep(vec2(.97),vec2(1.),focus));
+          float mask=uCenterMix*edge.x*edge.y;
+          light=mix(light,resolve(focus,uCenterFirst,uCenterSecond),mask);
+          escape=mix(escape,texture(uCenterSky,focus),mask);
+        }
         // Use the full bilinear ramp of the escape flag so the silhouette keeps a soft antialiased edge.
         float open=smoothstep(.02,.98,escape.w);
         vec3 direction=escape.xyz/max(length(escape.xyz),1e-3);
@@ -235,9 +251,9 @@
       objects.push(["program",item]);
       return {item,uniform:Object.fromEntries(names.map(name=>[name,gl.getUniformLocation(item,name)]))};
     }
-    const traceProgram=program(vertex,traceFragment,["uExtent","uOrigin","uObserver","uRight","uUp","uForward","uDistance","uSpin","uHorizon","uInner","uOuter","uStepScale","uSteps"]);
+    const traceProgram=program(vertex,traceFragment,["uExtent","uUvOffset","uUvScale","uOrigin","uObserver","uRight","uUp","uForward","uDistance","uSpin","uHorizon","uInner","uOuter","uStepScale","uSteps"]);
     const atlasProgram=program(atlasVertex,atlasFragment,["uInner","uOuter","uSpin","uTime"]);
-    const emitProgram=program(vertex,emitFragment,["uFirst","uSecond","uAtlas","uFlux","uSky","uInner","uOuter","uViewYaw"]);
+    const emitProgram=program(vertex,emitFragment,["uFirst","uSecond","uAtlas","uFlux","uSky","uCenterFirst","uCenterSecond","uCenterSky","uCenterMix","uUvOffset","uUvScale","uInner","uOuter","uViewYaw"]);
     const displayProgram=program(vertex,displayFragment,["uImage","uTexel","uDiveFade"]);
     const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);objects.push(["buffer",quad]);
     const seeds=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,seeds);gl.bufferData(gl.ARRAY_BUFFER,particles,gl.STATIC_DRAW);objects.push(["buffer",seeds]);
@@ -264,6 +280,9 @@
     const atlas=target(1028,512);
     const fluxTexture=texture(256,1);
     let map=null,image=null,geometryKey="",profileKey="",refined=false,refineAt=0,timer=0,disposed=false,forceRefinement=false;
+    // Foveal state plus the adaptive interactive budget ladder (rung = target coarse pixels).
+    let center=null,centerActive=false,centerRect=[0,0,1,1],lastTraceQuality=null;
+    let rung=240000,emaSeconds=null,coarseFrames=0,lastCoarseAt=0,adaptCooldown=0;
     let viewport={width:1,height:1,scale:1};
     const maxTargetSize=Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE),gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
     function imageDimensions(size) {
@@ -286,7 +305,9 @@
     function traceMap(model,high) {
       const started=performance.now(),aspect=viewport.width/viewport.height;
       // A small viewport never traces more samples than its actual composed image can display.
-      const output=imageDimensions(viewport),budget=Math.min(high?1200000:160000,output.width*output.height);
+      // The interactive rung adapts to measured frame cost; refinement scales with capability.
+      const output=imageDimensions(viewport);
+      const budget=Math.min(high?Math.max(1200000,Math.min(rung*2,2560000)):rung,output.width*output.height);
       let height=Math.max(64,Math.floor(Math.sqrt(budget/aspect))),width=Math.max(64,Math.floor(height*aspect));
       const fit=Math.min(1,maxTargetSize/width,maxTargetSize/height);
       width=Math.max(1,Math.floor(width*fit));height=Math.max(1,Math.floor(height*fit));
@@ -295,12 +316,47 @@
       const flight=navigation.view(state.viewZoom??state.zoom,state.reducedMotion);
       const camera=geodesics.observer(model.spin,state.tilt,flight.distance),u=traceProgram.uniform;
       gl.uniform2f(u.uExtent,viewport.width/viewport.scale,viewport.height/viewport.scale);
+      gl.uniform2f(u.uUvOffset,0,0);gl.uniform2f(u.uUvScale,1,1);
       gl.uniform3fv(u.uOrigin,camera.origin);gl.uniform4fv(u.uObserver,camera.u);
       gl.uniform4fv(u.uRight,camera.basis[0]);gl.uniform4fv(u.uUp,camera.basis[1]);gl.uniform4fv(u.uForward,camera.basis[2]);
-      for(const [key,value] of Object.entries({uDistance:camera.distance,uSpin:model.spin,uHorizon:model.horizon,uInner:model.isco,uOuter:model.outer,uStepScale:high ? .065 : .11}))gl.uniform1f(u[key],value);
-      gl.uniform1i(u.uSteps,high?320:224);gl.drawArrays(gl.TRIANGLES,0,6);
+      for(const [key,value] of Object.entries({uDistance:camera.distance,uSpin:model.spin,uHorizon:model.horizon,uInner:model.isco,uOuter:model.outer,uStepScale:high ? .065 : .09}))gl.uniform1f(u[key],value);
+      gl.uniform1i(u.uSteps,high?320:256);gl.drawArrays(gl.TRIANGLES,0,6);
       metrics.geodesicBuilds++;metrics.traceWidth=width;metrics.traceHeight=height;metrics.traceSubmitMs=performance.now()-started;
       metrics.traceQuality=high?"refined":"interactive";metrics.traceBudget=budget;
+      lastTraceQuality=metrics.traceQuality;centerActive=false;
+      if(!high) {
+        // Foveal overlay: retrace the screen-center rectangle at refined quality so the
+        // photon ring stays crisp while dragging. The full map above is always traced
+        // first, and refined frames replace the overlay entirely.
+        const side=Math.max(160,Math.min(Math.round(Math.min(output.width,output.height)*.34),Math.round(480*Math.sqrt(rung/1200000))));
+        if(!center||center.width!==side){discard(center);center=target(side,side,3,gl.LINEAR);}
+        gl.bindFramebuffer(gl.FRAMEBUFFER,center.framebuffer);gl.viewport(0,0,side,side);
+        centerRect=[.5-.5*side/output.width,.5-.5*side/output.height,side/output.width,side/output.height];
+        gl.uniform2f(u.uUvOffset,centerRect[0],centerRect[1]);gl.uniform2f(u.uUvScale,centerRect[2],centerRect[3]);
+        gl.uniform1f(u.uStepScale,.065);gl.uniform1i(u.uSteps,320);gl.drawArrays(gl.TRIANGLES,0,6);
+        centerActive=true;metrics.centerPixels=side*side;
+      } else metrics.centerPixels=0;
+    }
+    // The interactive budget follows measured frame cost: strong GPUs trace near-refined
+    // maps while dragging; weak ones fall back toward the fixed floor of earlier builds.
+    function adaptToFrameCost(frameSeconds) {
+      metrics.interactiveBudget=rung;
+      if(lastTraceQuality!=="interactive")return;
+      const now=performance.now();
+      if(lastCoarseAt&&now-lastCoarseAt<=200) {
+        // Idle gaps must not poison the moving average, so a drag after a pause restarts it.
+        const seconds=Math.max(0,Math.min(frameSeconds,.05));
+        emaSeconds=emaSeconds===null?seconds:emaSeconds*.8+seconds*.2;
+        if(adaptCooldown>0)adaptCooldown--;
+        else if(++coarseFrames>=8) {
+          coarseFrames=0;
+          const ceiling=Math.min(1200000,imageDimensions(viewport).width*imageDimensions(viewport).height);
+          if(emaSeconds>.024&&rung>160000){rung=Math.max(160000,Math.round(rung*.72));adaptCooldown=4;}
+          else if(emaSeconds<.015&&rung<ceiling){rung=Math.min(ceiling,Math.round(rung*1.35));adaptCooldown=4;}
+        }
+      } else coarseFrames=0;
+      metrics.frameMs=emaSeconds===null?0:emaSeconds*1000;
+      lastCoarseAt=now;
     }
     function ensureGeometry(model) {
       const key=[model.spin,state.tilt,state.viewZoom??state.zoom,viewport.width,viewport.height,model.isco,model.outer].join(":");
@@ -314,9 +370,9 @@
     }
     return {
       kind:"webgl",count:()=>state.density,metrics,
-      draw(size) {
+      draw(size,frameSeconds=0) {
         if(disposed)return;
-        viewport=size;const model=physics.model(state),flight=navigation.view(state.viewZoom??state.zoom,state.reducedMotion);updateProfile(model);ensureGeometry(model);
+        viewport=size;const model=physics.model(state),flight=navigation.view(state.viewZoom??state.zoom,state.reducedMotion);updateProfile(model);lastTraceQuality=null;ensureGeometry(model);adaptToFrameCost(frameSeconds);
         metrics.observerDistance=flight.distance;metrics.orbitAngle=state.yaw+flight.orbit;metrics.horizonFade=flight.fade;
         const {width,height}=imageDimensions(size);
         metrics.canvasWidth=size.width;metrics.canvasHeight=size.height;metrics.imageWidth=width;metrics.imageHeight=height;
@@ -329,6 +385,11 @@
         gl.drawArraysInstanced(gl.POINTS,0,state.density,3);gl.disable(gl.BLEND);
         gl.bindFramebuffer(gl.FRAMEBUFFER,image.framebuffer);gl.viewport(0,0,width,height);bindQuad(emitProgram);
         sampler(emitProgram,"uFirst",0,map.images[0]);sampler(emitProgram,"uSecond",1,map.images[1]);sampler(emitProgram,"uAtlas",2,atlas.images[0]);sampler(emitProgram,"uFlux",3,fluxTexture);sampler(emitProgram,"uSky",4,map.images[2]);
+        // Foveal samplers stay bound to valid textures even while the overlay is off.
+        const focus=center?center.images:map.images;
+        sampler(emitProgram,"uCenterFirst",5,focus[0]);sampler(emitProgram,"uCenterSecond",6,focus[1]);sampler(emitProgram,"uCenterSky",7,focus[2]);
+        gl.uniform2f(emitProgram.uniform.uUvOffset,centerRect[0],centerRect[1]);gl.uniform2f(emitProgram.uniform.uUvScale,centerRect[2],centerRect[3]);
+        gl.uniform1f(emitProgram.uniform.uCenterMix,centerActive?1:0);
         gl.uniform1f(emitProgram.uniform.uInner,model.isco);gl.uniform1f(emitProgram.uniform.uOuter,model.outer);gl.uniform1f(emitProgram.uniform.uViewYaw,state.yaw+flight.orbit);gl.drawArrays(gl.TRIANGLES,0,6);
         gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);bindQuad(displayProgram);sampler(displayProgram,"uImage",0,image.images[0]);gl.uniform2f(displayProgram.uniform.uTexel,1/width,1/height);gl.uniform1f(displayProgram.uniform.uDiveFade,flight.fade);gl.drawArrays(gl.TRIANGLES,0,6);
         metrics.frames++;

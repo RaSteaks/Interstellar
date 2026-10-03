@@ -59,7 +59,7 @@
   // Trace geometry only when camera/model parameters change; resolve animated light every frame.
   function createWebGLRenderer() {
     const engine=globalThis.BlackHoleRaytracer.create({canvas,particles,state,physics,onNeedsFrame:requestRender});
-    return engine && {...engine,draw:()=>engine.draw(size)};
+    return engine && {...engine,draw:seconds=>engine.draw(size,seconds)};
   }
 
   // A WebGL canvas cannot change context type; preserve its accessible name on the replacement.
@@ -150,7 +150,7 @@
       flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
       flightStatus.textContent=flightStage==="inside"?"已进入视界 · 缩小或按 Esc 返回":"接近视界 · 缩小可返回";
     }
-    lastTime=now;renderer.draw();
+    lastTime=now;renderer.draw(elapsed);
     // Camera easing settles while particles are paused. Park at the opaque endpoint
     // instead of spending GPU work on invisible particles; any input wakes the view.
     if((moving||(!state.paused&&flight.fade<1))&&!document.hidden&&!contextLost&&!frame)frame=requestAnimationFrame(animate);
