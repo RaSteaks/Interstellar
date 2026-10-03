@@ -89,11 +89,14 @@ h2 { font-size: 1.125rem; font-weight: 500; margin-top: 5px; }
 .noscript { position: absolute; bottom: 30px; width: 100%; text-align: center; color: var(--muted); }
 .scene:fullscreen { width: 100%; height: 100dvh; }
 @media (max-width: 500px) {
-  .control-shell { top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); }
-  /* Phones: the panel docks to the bottom so the upper half keeps the hole in view. */
-  .control-shell { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); }
-  .scene.controls-open #cosmos { translate: 0 -10svh; }
-  .controls { top: auto; bottom: 56px; width: 296px; max-width: calc(100vw - 24px); max-height: min(40svh, calc(100svh - 120px)); padding: 20px 18px 22px; }
+  /* Phones: a full-width bottom sheet grows behind the corner toggle, which stays
+     put as its close button, so no vacated strip is left uncovered beside it. */
+  .control-shell { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); right: max(12px, env(safe-area-inset-right)); }
+  .control-shell[open] > .control-toggle { position: absolute; bottom: 0; right: 0; z-index: 1; }
+  .controls { top: auto; bottom: 0; width: calc(100vw - 24px); max-width: none; max-height: min(40svh, calc(100svh - 120px)); padding: 20px 18px 64px; }
+  /* The hole centers in the strip the sheet leaves above it: half of 60svh minus gutter. */
+  .scene.controls-open #cosmos { translate: 0 calc((20svh + 6px) * -1); }
+  .scene.controls-open .flight-status { bottom: calc(max(12px, env(safe-area-inset-bottom)) + min(40svh, calc(100svh - 120px)) + 12px); }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
 @media (forced-colors: active) {
