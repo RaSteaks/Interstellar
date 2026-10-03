@@ -6,7 +6,9 @@
   const smooth=value=>value*value*(3-2*value);
   function view(zoom,reducedMotion=false) {
     const progress=Math.max(0,Math.min(1,Math.log(Math.max(zoom,limits.orbitStart)/limits.orbitStart)/Math.log(limits.max/limits.orbitStart)));
-    const travel=smooth(progress),fade=smooth(Math.max(0,Math.min(1,(progress-.86)/.14)));
+    // The shadow swallows the view well before the horizon, so dimming starts at
+    // ~6.6x (progress .72) and completes exactly at the 12x crossing endpoint.
+    const travel=smooth(progress),fade=smooth(Math.max(0,Math.min(1,(progress-.72)/.28)));
     // Static observer frames remain outside the ergosphere. Crossing is a reversible
     // cinematic fade, not a computed observer or scene inside the event horizon.
     return {zoom,progress,distance:80*Math.exp(Math.log(3/80)*travel),orbit:reducedMotion?0:travel*Math.PI*2.5,fade,stage:fade>=.999?"inside":progress>=.55?"approach":progress>0?"orbit":"observe"};

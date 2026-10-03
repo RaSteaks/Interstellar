@@ -25,6 +25,8 @@ for(let i=0;i<=200;i++){
 }
 near(nav.view(1).distance,80);near(nav.view(12).distance,3);
 assert.equal(nav.view(12).stage,'inside');assert.equal(nav.view(12).fade,1);
+// Retuned horizon fade window: dimming starts ~6.6x (progress .72) and completes only at the 12x endpoint.
+near(nav.view(6.6).fade,0,2e-3);near(nav.view(7).fade,.0302,2e-3);near(nav.view(8).fade,.2495,2e-3);near(nav.view(9).fade,.5326,2e-3);
 assert.equal(nav.view(12,true).orbit,0);assert.equal(nav.smoothZoom(1,12,.016,true),12);
 for(const [from,to] of [[1,12],[12,1]]){
  let value=from;
