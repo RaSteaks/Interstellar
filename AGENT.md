@@ -1,4 +1,10 @@
-# 黑洞观测站项目方案
+# Interstellar 项目方案
+
+## 统一仓库布局
+
+网站源码、检查、方案文档和 Sites 配置统一放在 `Interstellar/` 根目录，由唯一的 `.git` 管理。公共远端为 `https://github.com/RaSteaks/Interstellar.git`；网站历史与原外层仓库的提交历史通过合并保留，不使用嵌套仓库或子模块。
+
+从仓库根目录执行检查和发布；静态目录为 `dist/`，科学核心检查为 `node checks/render-physics.cjs`，本地预览可直接服务 `dist/`。保留 `.openai/hosting.json` 中的现有项目身份与静态目录，通过 Sites 更新同一个网站，并保留当前访问范围和缩略图。
 
 ## 目标与边界
 
