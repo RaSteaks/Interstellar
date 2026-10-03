@@ -11,7 +11,7 @@
   const flightStatus = document.querySelector("#flight-status");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   const defaults = { model: "kerr", spin: 0.65, tilt: 18, speed: 1, density: 32000, zoom: 1, yaw: 0 };
-  const state = { ...defaults, paused: reducedMotion.matches, time: 0, viewZoom: defaults.zoom, reducedMotion: reducedMotion.matches };
+  const state = { ...defaults, paused: reducedMotion.matches, time: 0, viewZoom: defaults.zoom, reducedMotion: reducedMotion.matches, drift: 0 };
   const fields = Object.fromEntries(["spin", "tilt", "speed", "density", "zoom"].map(key => [key, document.getElementById(key)]));
   let renderer;
   let frame = 0;
@@ -19,6 +19,9 @@
   let contextLost = false;
   let flightStage = "observe";
   let size = { width: 1, height: 1, dpr: 1, scale: 1 };
+  // Start at full idle speed unless the system requests no automatic camera motion.
+  let driftAngle = 0, driftRate = reducedMotion.matches?0:1, driftUntil = null;
+  const markDriftInteraction = () => { driftUntil = performance.now(); };
 
   // Fixed seeds keep density changes stable. Gaussian heights form a thin disk rather than a tube.
   function randomGenerator(seed) {
@@ -75,7 +78,7 @@
         if(!profile||profile.spin!==model.spin)profile={...physics.diskProfile(model.spin,model.outer),spin:model.spin};
         context.fillStyle="#08090d";context.fillRect(0,0,w,h);
         // Sky first: stars and the Milky-Way band sit behind halo, shadow and disk.
-        const flight=navigation.view(state.viewZoom,state.reducedMotion),viewYaw=state.yaw+flight.orbit;
+        const flight=navigation.view(state.viewZoom,state.reducedMotion),viewYaw=state.yaw+flight.orbit+state.drift;
         const tiltAngle=state.tilt*Math.PI/180,cosYaw=Math.cos(-viewYaw),sinYaw=Math.sin(-viewYaw);
         const forwardY=Math.cos(tiltAngle),forwardZ=-Math.sin(tiltAngle),upY=Math.sin(tiltAngle),upZ=Math.cos(tiltAngle);
         const focal=flight.distance*scale;
@@ -145,6 +148,15 @@
     const moving=state.viewZoom!==state.zoom;
     if(movingBefore&&!moving)renderer.refine?.();
     const flight=navigation.view(state.viewZoom,state.reducedMotion);
+    // Idle drift runs only for the full-view framing: the zoom journey owns the orbit
+    // beyond 1.4x, the open panel keeps the stage, and a recent interaction holds it off.
+    // Reduced motion freezes the camera immediately, even when disk playback is enabled.
+    if(state.reducedMotion)driftRate=0;
+    else if(!state.paused&&!document.hidden){
+      const suppressed=gestures.active||shell.open||flight.stage!=="observe"||(driftUntil!==null&&now-driftUntil<navigation.drift.waitSeconds*1000);
+      const advanced=navigation.driftStep(driftAngle,driftRate,elapsed,suppressed);
+      driftAngle=advanced.angle;driftRate=advanced.rate;state.drift=driftAngle;
+    }
     if(flight.stage!==flightStage){
       flightStage=flight.stage;
       flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
@@ -224,11 +236,12 @@
     toggle.title=shell.open?"收起观测控制":"展开观测控制";
     // The view pans away from the open panel so the hole never sits behind it.
     scene.classList.toggle("controls-open",shell.open);
+    markDriftInteraction();
   });
   document.addEventListener("keydown",event=>{
     if(event.key!=="Escape")return;
     if(shell.open){shell.open=false;toggle.focus();}
-    else if(state.zoom>navigation.limits.orbitStart){event.preventDefault();gestures.cancel();applySettings({zoom:1},"已返回远观视角。");}
+    else if(state.zoom>navigation.limits.orbitStart){event.preventDefault();gestures.cancel();markDriftInteraction();applySettings({zoom:1},"已返回远观视角。");}
   });
   document.addEventListener("pointerdown",event=>{if(shell.open&&!shell.contains(event.target))shell.open=false;});
   const fullButton=document.querySelector("#fullscreen");
@@ -244,13 +257,15 @@
   reducedMotion.addEventListener("change",event=>{state.reducedMotion=event.matches;if(event.matches)applySettings({paused:true},"已按减少动态效果偏好暂停，可点击播放继续观测。");else requestRender();});
 
   const surface=activeCanvas();
-  const gestures=navigation.bind(surface,{read:()=>state,change:settings=>applySettings(settings),finish:()=>renderer.refine?.()});
+  // The gesture owner holds idle drift for captured pointers and native trackpad
+  // gestures alike; ignored buttons never latch a hold, and wheel uses the idle window.
+  const gestures=navigation.bind(surface,{read:()=>state,change:settings=>{markDriftInteraction();applySettings(settings);},finish:()=>{markDriftInteraction();renderer.refine?.();}});
   window.addEventListener("blur",gestures.cancel);
   window.addEventListener("pagehide",event=>{if(!event.persisted)gestures.dispose();});
   surface.addEventListener("keydown",event=>{
     if(event.ctrlKey||event.metaKey)return;
     const edits={ArrowLeft:{yaw:state.yaw-.12},ArrowRight:{yaw:state.yaw+.12},ArrowUp:{tilt:Math.min(85,state.tilt+2)},ArrowDown:{tilt:Math.max(8,state.tilt-2)},"+":{zoom:navigation.clampZoom(state.zoom*1.15)},"=":{zoom:navigation.clampZoom(state.zoom*1.15)},"-":{zoom:navigation.clampZoom(state.zoom/1.15)}," ":{paused:!state.paused}};
-    if(!Object.hasOwn(edits,event.key))return;event.preventDefault();applySettings(edits[event.key]);
+    if(!Object.hasOwn(edits,event.key))return;event.preventDefault();markDriftInteraction();applySettings(edits[event.key]);
   });
   if(renderer.kind==="webgl") {
     surface.addEventListener("webglcontextlost",event=>{event.preventDefault();gestures.cancel();contextLost=true;if(frame)cancelAnimationFrame(frame);frame=0;state.paused=true;updateUI("图形画面暂时中断，正在等待恢复。");});

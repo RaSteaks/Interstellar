@@ -23,6 +23,17 @@
     const delta=Math.max(-2000,Math.min(2000,event.deltaY*unit));
     return clampZoom(current*Math.exp(-delta*(event.ctrlKey||event.metaKey ? .01 : .0015)));
   }
+  // Idle camera drift: a slow continuous orbit that reuses the axial-symmetry sky and
+  // disk azimuth rotation, so it never retraces. The rate eases linearly to rest while
+  // the user interacts and back after a quiet period; the angle itself never jumps.
+  const drift=Object.freeze({degreesPerSecond:.02,waitSeconds:6,resumeSeconds:3,stopSeconds:.8});
+  function driftStep(angle,rate,elapsed,suppressed) {
+    const target=suppressed?0:1;
+    const span=target>rate?drift.resumeSeconds:drift.stopSeconds;
+    const step=Math.max(0,elapsed)/span;
+    const next=Math.abs(target-rate)<=step?target:rate+(target>rate?step:-step);
+    return {angle:angle+next*drift.degreesPerSecond*Math.PI/180*Math.max(0,elapsed),rate:next};
+  }
   function bind(surface,{read,change,finish}) {
     const points=new Map(),lifecycle=new AbortController();
     let drag=null,pinch=null,gesture=null,wheelTimer=0;
@@ -74,7 +85,9 @@
       for(const id of ids)if(surface.hasPointerCapture(id))surface.releasePointerCapture(id);
       if(active)finish();
     }
-    return {cancel,dispose(){cancel();lifecycle.abort();}};
+    // Report actual input ownership, including native gestures without pointer events.
+    // Releases and cancellation update the same state, so unrelated buttons cannot latch it.
+    return {get active(){return points.size>0||gesture!==null;},cancel,dispose(){cancel();lifecycle.abort();}};
   }
-  globalThis.BlackHoleNavigation=Object.freeze({limits,clampZoom,view,smoothZoom,wheelZoom,bind});
+  globalThis.BlackHoleNavigation=Object.freeze({limits,clampZoom,view,smoothZoom,wheelZoom,drift,driftStep,bind});
 })();

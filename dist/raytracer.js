@@ -373,7 +373,7 @@
       draw(size,frameSeconds=0) {
         if(disposed)return;
         viewport=size;const model=physics.model(state),flight=navigation.view(state.viewZoom??state.zoom,state.reducedMotion);updateProfile(model);lastTraceQuality=null;ensureGeometry(model);adaptToFrameCost(frameSeconds);
-        metrics.observerDistance=flight.distance;metrics.orbitAngle=state.yaw+flight.orbit;metrics.horizonFade=flight.fade;
+        metrics.observerDistance=flight.distance;metrics.orbitAngle=state.yaw+flight.orbit+(state.drift??0);metrics.horizonFade=flight.fade;
         const {width,height}=imageDimensions(size);
         metrics.canvasWidth=size.width;metrics.canvasHeight=size.height;metrics.imageWidth=width;metrics.imageHeight=height;
         if(!image||image.width!==width||image.height!==height){discard(image);image=target(width,height);}
@@ -390,7 +390,7 @@
         sampler(emitProgram,"uCenterFirst",5,focus[0]);sampler(emitProgram,"uCenterSecond",6,focus[1]);sampler(emitProgram,"uCenterSky",7,focus[2]);
         gl.uniform2f(emitProgram.uniform.uUvOffset,centerRect[0],centerRect[1]);gl.uniform2f(emitProgram.uniform.uUvScale,centerRect[2],centerRect[3]);
         gl.uniform1f(emitProgram.uniform.uCenterMix,centerActive?1:0);
-        gl.uniform1f(emitProgram.uniform.uInner,model.isco);gl.uniform1f(emitProgram.uniform.uOuter,model.outer);gl.uniform1f(emitProgram.uniform.uViewYaw,state.yaw+flight.orbit);gl.drawArrays(gl.TRIANGLES,0,6);
+        gl.uniform1f(emitProgram.uniform.uInner,model.isco);gl.uniform1f(emitProgram.uniform.uOuter,model.outer);gl.uniform1f(emitProgram.uniform.uViewYaw,state.yaw+flight.orbit+(state.drift??0));gl.drawArrays(gl.TRIANGLES,0,6);
         gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);bindQuad(displayProgram);sampler(displayProgram,"uImage",0,image.images[0]);gl.uniform2f(displayProgram.uniform.uTexel,1/width,1/height);gl.uniform1f(displayProgram.uniform.uDiveFade,flight.fade);gl.drawArrays(gl.TRIANGLES,0,6);
         metrics.frames++;
       },
