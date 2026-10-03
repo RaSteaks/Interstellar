@@ -118,6 +118,11 @@
         vec3 cool=mix(vec3(.04,.16,.37),vec3(.56,.85,1.),smoothstep(.15,1.10,t));
         return mix(warm,cool,uPalette);
       }
+      // Milky-Way helpers shared by dust and stars: a gaussian plane, dark dust rifts
+      // along it, and a bulge toward one galactic-center direction on the great circle.
+      float bandProfile(vec3 dir,vec3 bandNormal){return exp(-pow(dot(dir,bandNormal)*4.8,2.));}
+      float bandDust(vec3 dir){return .3+.7*smoothstep(.24,.8,vnoise(dir*7.5+3.7));}
+      float bandCenter(vec3 dir){return .55+.75*smoothstep(-.25,.95,dot(dir,normalize(vec3(-.42,.62,.66))));}
       // Star cells on the direction sphere: each cell lights one gaussian star, rarity skews magnitudes.
       vec3 starLayer(vec3 dir,float scale,float rarity,float sharpness,float weight,float bandBoost,vec3 bandNormal) {
         vec3 cell=floor(dir*scale);
@@ -125,19 +130,23 @@
         // Radial projection puts the star on the sphere, so every cell renders; d2 is squared angular distance.
         vec3 star=normalize(cell+.2+.6*random);
         float magnitude=hash13(cell+vec3(rarity*.031));
-        float band=exp(-pow(dot(dir,bandNormal)*4.8,2.));
-        vec3 tint=mix(vec3(.66,.76,1.),vec3(1.,.82,.62),random.x);
+        float band=bandProfile(dir,bandNormal)*bandDust(dir)*bandCenter(dir);
+        // Coarse blackbody spread: mostly blue-white to warm white with a thin red-giant tail.
+        float temperature=hash13(cell+vec3(31.7));
+        vec3 tint=mix(vec3(.66,.76,1.),vec3(1.,.86,.72),temperature);
+        tint=mix(tint,vec3(1.,.6,.4),smoothstep(.86,1.,temperature));
         return tint*(exp(-dot(dir-star,dir-star)*sharpness)*pow(magnitude,rarity)*weight*(.3+band*bandBoost));
       }
       // Sky sampled with the escaped ray direction, so lensing bends star positions for free.
       vec3 skyColor(vec3 dir) {
         vec3 bandNormal=normalize(vec3(.88,.34,.33));
-        // A narrow Milky-Way band leaves most of the sky near the deep-space base color.
-        float band=exp(-pow(dot(dir,bandNormal)*4.8,2.));
         float large=vnoise(dir*2.6),fine=vnoise(dir*6.3+9.4);
-        vec3 sky=vec3(.0032,.0044,.0082);
-        // Band glow sits well below the disk peak so deep space stays near-black around the hole.
-        sky+=band*(.5+.5*fine)*mix(vec3(.055,.078,.144),vec3(.117,.078,.055),large)*(.42+.6*large);
+        // Dust lanes and the bulge retain their structure, but diffuse light needs a
+        // much lower gain than compact stars before the shared exposure/gamma curve.
+        float band=bandProfile(dir,bandNormal)*bandDust(dir)*bandCenter(dir);
+        const float diffuseSkyGain=.04;
+        vec3 sky=vec3(.00012,.00016,.00028);
+        sky+=diffuseSkyGain*band*(.5+.5*fine)*mix(vec3(.055,.078,.144),vec3(.117,.078,.055),large)*(.42+.6*large);
         sky+=starLayer(dir,17.,15.,870000.,1.1,.8,bandNormal);
         sky+=starLayer(dir,38.,22.,1600000.,.5,1.8,bandNormal);
         sky+=starLayer(dir,62.,30.,2100000.,.32,2.6,bandNormal);

@@ -81,7 +81,8 @@
           if(depth<.3)continue;
           const px=cx+rx/depth*focal,py=cy-(ry*upY+blob.z*upZ)/depth*focal,radius=blob.radius*focal,rgb=blob.blue?"96,132,200":"190,140,100";
           const glow=context.createRadialGradient(px,py,0,px,py,radius);
-          glow.addColorStop(0,`rgba(${rgb},${blob.alpha})`);glow.addColorStop(1,`rgba(${rgb},0)`);
+          // Keep continuous band glow faint in compatibility mode; stars retain their contrast.
+          glow.addColorStop(0,`rgba(${rgb},${blob.alpha*.08})`);glow.addColorStop(1,`rgba(${rgb},0)`);
           context.fillStyle=glow;context.fillRect(px-radius,py-radius,radius*2,radius*2);
         }
         for(const star of sky.stars) {
