@@ -75,9 +75,40 @@ const pair=g.trace(camera,-9,0,6,26,{stepScale:.03,steps:600}),mirror=g.trace(ca
 assert.ok(pair.hits.length>0 && mirror.hits.length>0);
 assert.ok(Math.max(...pair.hits.map(h=>h.shift))>Math.max(...mirror.hits.map(h=>h.shift)));
 
+// The sky is sampled along the asymptotic direction of each escaped ray. Reading the
+// covariant momentum p at the r>95 cutoff leaves the bending beyond that radius
+// unaccounted and shifts the lensed star field; the coordinate velocity removes it.
+// Both forms are compared against a ray integrated far past the cutoff.
+{
+ const spin=.65,horizon=1+Math.sqrt(1-spin*spin),skyCamera=g.observer(spin,18);
+ const norm=vector=>{const length=Math.hypot(...vector);return vector.map(value=>value/length);};
+ const angle=(a,b)=>Math.acos(Math.max(-1,Math.min(1,a.reduce((sum,value,i)=>sum+value*b[i],0))))*180/Math.PI;
+ let momentumError=0,velocityError=0,samples=0;
+ for(const alpha of [-18,-6,6,18])for(const beta of [-18,-6,6,18]){
+  let ray=g.initialRay(skyCamera,alpha,beta),atCutoff=null,captured=false,escaped=false;
+  for(let i=0;i<20000;i++){
+   const r=g.geometry(ray.x,spin).r;
+   if(r<=horizon*1.003){captured=true;break;}
+   if(r>95&&!atCutoff)atCutoff={momentum:norm(ray.p),velocity:g.skyDirection(ray,spin)};
+   if(r>1e6){escaped=true;break;}
+   // Geometric steps far outside the disk reach the weak-field asymptote cheaply.
+   ray=g.advance(ray,spin,r>95?Math.max(1,r*.25):Math.min(3.5,Math.max(.004,r*.065),.012+.14*Math.max(0,r-horizon)));
+  }
+  if(captured||!atCutoff||!escaped)continue;
+  const truth=g.skyDirection(ray,spin);
+  momentumError=Math.max(momentumError,angle(atCutoff.momentum,truth));
+  velocityError=Math.max(velocityError,angle(atCutoff.velocity,truth));
+  samples++;
+ }
+ assert.ok(samples>=12,'sky direction sample coverage');
+ assert.ok(velocityError<.05,`escape direction must match the far-field asymptote (got ${velocityError.toFixed(4)} deg)`);
+ assert.ok(momentumError>10*velocityError,`the momentum shortcut must be measurably worse (got ${momentumError.toFixed(4)} deg)`);
+}
+
 // Shaders carry no compiler in node: assert structural validity and that every
 // uniform name wired in raytracer.js is declared in some shader stage.
 const raytracer=fs.readFileSync(path.join(__dirname,'../dist/raytracer.js'),'utf8');
+assert.ok(/if\(escaped\)\{Geometry exit=metric\(x,uSpin\)/.test(raytracer),'the traced sky direction must use the coordinate velocity at the escape cutoff');
 const stages=[...raytracer.matchAll(/`#version 300 es[^`]*`/g)].map(match=>match[0]);
 assert.equal(stages.length,6);
 for(const stage of stages){

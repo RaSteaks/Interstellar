@@ -76,7 +76,11 @@
             }
           }
         }
-        if(escaped)skyHit=vec4(normalize(p),1.);
+        // The sky direction is the coordinate velocity dx/dlambda = p - f k n, not the
+        // covariant momentum p. At the r>95 cutoff the two differ by ~0.5 degrees, which
+        // would displace the lensed star field and the arcs near the shadow; the CPU
+        // check asserts this same expression against the far-field asymptote.
+        if(escaped){Geometry exit=metric(x,uSpin);float k=dot(exit.n,p)-energy;skyHit=vec4(normalize(p-exit.f*k*exit.n),1.);}
       }
     `;
     const atlasVertex=`#version 300 es
@@ -130,13 +134,14 @@
       float bandDust(vec3 dir){return .3+.7*smoothstep(.24,.8,vnoise(dir*7.5+3.7));}
       float bandCenter(vec3 dir){return .55+.75*smoothstep(-.25,.95,dot(dir,normalize(vec3(-.42,.62,.66))));}
       // Star cells on the direction sphere: each cell lights one gaussian star, rarity skews magnitudes.
-      vec3 starLayer(vec3 dir,float scale,float rarity,float sharpness,float weight,float bandBoost,vec3 bandNormal) {
+      // The galactic-band weight is identical for all three layers, so skyColor evaluates it once
+      // per pixel and passes it down rather than repeating the dust noise in every layer.
+      vec3 starLayer(vec3 dir,float scale,float rarity,float sharpness,float weight,float bandBoost,float band) {
         vec3 cell=floor(dir*scale);
         vec3 random=hash33(cell+vec3(scale*.017));
         // Radial projection puts the star on the sphere, so every cell renders; d2 is squared angular distance.
         vec3 star=normalize(cell+.2+.6*random);
         float magnitude=hash13(cell+vec3(rarity*.031));
-        float band=bandProfile(dir,bandNormal)*bandDust(dir)*bandCenter(dir);
         // Coarse blackbody spread: mostly blue-white to warm white with a thin red-giant tail.
         float temperature=hash13(cell+vec3(31.7));
         vec3 tint=mix(vec3(.66,.76,1.),vec3(1.,.86,.72),temperature);
@@ -149,13 +154,14 @@
         float large=vnoise(dir*2.6),fine=vnoise(dir*6.3+9.4);
         // Dust lanes and the bulge retain their structure, but diffuse light needs a
         // much lower gain than compact stars before the shared exposure/gamma curve.
+        // The same weight drives the star layers, so it is computed once here.
         float band=bandProfile(dir,bandNormal)*bandDust(dir)*bandCenter(dir);
         const float diffuseSkyGain=.04;
         vec3 sky=vec3(.00012,.00016,.00028);
         sky+=diffuseSkyGain*band*(.5+.5*fine)*mix(vec3(.055,.078,.144),vec3(.117,.078,.055),large)*(.42+.6*large);
-        sky+=starLayer(dir,17.,15.,870000.,1.1,.8,bandNormal);
-        sky+=starLayer(dir,38.,22.,1600000.,.5,1.8,bandNormal);
-        sky+=starLayer(dir,62.,30.,2100000.,.32,2.6,bandNormal);
+        sky+=starLayer(dir,17.,15.,870000.,1.1,.8,band);
+        sky+=starLayer(dir,38.,22.,1600000.,.5,1.8,band);
+        sky+=starLayer(dir,62.,30.,2100000.,.32,2.6,band);
         return sky;
       }
       vec4 emission(vec4 hit) {
@@ -166,8 +172,9 @@
         float atlasAngle=(fract((hit.y+uViewYaw)/6.28318530718+.5)*1024.+2.)/1028.;
         float grain=texture(uAtlas,vec2(atlasAngle,q)).r;
         // The outer rim dissolves over the last ~12% of radius instead of clipping,
-        // so the disk meets the sky through a gradient rather than a hard cut.
-        float edge=smoothstep(1.,.88,q);
+        // so the disk meets the sky through a gradient rather than a hard cut. Written
+        // with ascending edges: smoothstep with edge0 >= edge1 is undefined in GLSL ES.
+        float edge=1.-smoothstep(.88,1.,q);
         float coverage=(.12+.55*grain)*edge;
         float opacity=1.-exp(-coverage*.65/max(hit.w,.075));
         float g=clamp(hit.z,.025,4.);
@@ -200,8 +207,14 @@
           vec2 focus=(vUv-uUvOffset)/uUvScale;
           vec2 edge=smoothstep(vec2(0.),vec2(.03),focus)*(1.-smoothstep(vec2(.97),vec2(1.),focus));
           float mask=uCenterMix*edge.x*edge.y;
-          light=mix(light,resolve(focus,uCenterFirst,uCenterSecond),mask);
-          escape=mix(escape,texture(uCenterSky,focus),mask);
+          // The overlay covers the center rectangle only. Resolving it outside that
+          // rectangle would re-shade every screen pixel for nothing, so the extra
+          // cost stays bounded by the refined area. Both center maps are single-level
+          // (LINEAR, no mipmap), so an implicit-LOD read in this branch is defined.
+          if(mask>0.) {
+            light=mix(light,resolve(focus,uCenterFirst,uCenterSecond),mask);
+            escape=mix(escape,texture(uCenterSky,focus),mask);
+          }
         }
         // Use the full bilinear ramp of the escape flag so the silhouette keeps a soft antialiased edge.
         float open=smoothstep(.02,.98,escape.w);

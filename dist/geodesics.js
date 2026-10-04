@@ -72,6 +72,15 @@
     const shift=1/emitterEnergy;
     return {r,phi:Math.atan2(x[1],x[0]),shift,mu:Math.min(1,Math.abs(p[2])*shift)};
   }
+  // The sky is sampled along each escaped ray's asymptotic direction, which is the
+  // coordinate velocity dx/dlambda = p - f k n, not the covariant momentum p. At the
+  // r~95 escape cutoff the two differ by ~0.5 degrees and would displace the lensed
+  // star field; the GPU shader evaluates this same expression.
+  function skyDirection(ray,spin) {
+    const geo=geometry(ray.x,spin),k=dot(geo.n,ray.p)-ray.energy;
+    const velocity=add(ray.p,mul(geo.n,-geo.f*k)),length=Math.hypot(...velocity);
+    return velocity.map(value=>value/length);
+  }
   function trace(camera,alpha,beta,inner,outer,options={}) {
     let ray=initialRay(camera,alpha,beta),maxError=Math.abs(hamiltonian(ray,camera.spin));
     const initialMomentum=ray.x[0]*ray.p[1]-ray.x[1]*ray.p[0];
@@ -137,5 +146,5 @@
       p+=h/6.*(p1+2.*p2+2.*p3+p4);
     }
   `;
-  globalThis.BlackHoleGeodesics=Object.freeze({geometry,metricDot,lower,observer,initialRay,hamiltonian,derivative,advance,hitRecord,trace,glsl});
+  globalThis.BlackHoleGeodesics=Object.freeze({geometry,metricDot,lower,observer,initialRay,hamiltonian,derivative,advance,hitRecord,skyDirection,trace,glsl});
 })();
