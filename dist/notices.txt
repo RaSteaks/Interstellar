@@ -15,6 +15,14 @@ integrator, full polarized transfer solver, or GRMHD simulation data.
 
 Further reading for the visual model (inspected for method; no source code
 included in this distribution):
+- Mummery, Ingram, Davis & Fabian (2024), arXiv:2405.09175 - finite ISCO
+  stress, plunging four-velocities, invariant frequency shifts, and the
+  radiation-pressure temperature law (equations 3, 47 and 59).
+  https://arxiv.org/abs/2405.09175
+  The live-particle model uses delta_J=0.02 and an injected proper radial
+  speed of 0.01c. Its E is solved from the timelike radial potential at
+  ISCO with circular-orbit L retained. This finite-inflow regularization
+  is not the paper's complete atmosphere or GRMHD model.
 - James, von Tunzelmann, Franklin & Thorne (2015), Class. Quantum Grav. 32
   065001, arXiv:1502.03808 - DNGR ray-bundle rendering of spinning black holes.
 - Gralla, Holz & Wald (2019), Phys. Rev. D 100, 024018, arXiv:1906.00873 -

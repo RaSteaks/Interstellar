@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>直接粒子 GPU 回归检查</title>
+<h1>直接粒子 GPU 回归检查</h1>
+<pre id="result" role="status">正在检查…</pre>
+<script src="../dist/physics.js"></script>
+<script src="../dist/geodesics.js"></script>
+<script src="../dist/navigation.js"></script>
+<script src="../dist/raytracer.js"></script>
+<script>
+"use strict";
+// Serve the repository root. This test exercises production GPU programs rather
+// than mocking particle emission, projection inversion, or context restoration.
+const result=document.querySelector("#result");
+try {
+  const canvas=document.createElement("canvas");canvas.width=canvas.height=257;
+  const gl=canvas.getContext("webgl2",{preserveDrawingBuffer:true});
+  if(!gl)throw new Error("WebGL2 unavailable; direct particles were not verified.");
+  let seed=81732;const random=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+  const particles=new Float32Array(6000*4);
+  for(let i=0;i<particles.length;i+=4){particles[i]=Math.pow(random(),1.65);particles[i+1]=random()*Math.PI*2;particles[i+2]=0;particles[i+3]=random();}
+  const calls=[],draw=gl.drawArraysInstanced.bind(gl);
+  gl.drawArraysInstanced=function(mode,start,count,instances){if(mode===gl.TRIANGLE_STRIP)calls.push({count,instances});draw(mode,start,count,instances);};
+  const state={model:"kerr",spin:.65,tilt:18,zoom:1,viewZoom:1,time:0,yaw:0,drift:0,reducedMotion:true,density:4000};
+  const engine=BlackHoleRaytracer.create({canvas,particles,state,physics:BlackHolePhysics,onNeedsFrame(){}});
+  if(!engine)throw new Error("Float targets unavailable.");
+  const size={width:257,height:257,scale:257*.028,dpr:1};
+  const assert=(condition,message)=>{if(!condition)throw new Error(message);};
+  const pixels=()=>{const data=new Uint8Array(257*257*4);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.readPixels(0,0,257,257,gl.RGBA,gl.UNSIGNED_BYTE,data);return data;};
+  const difference=(a,b)=>{let changed=0;for(let i=0;i<a.length;i+=4)if(a[i]!==b[i]||a[i+1]!==b[i+1]||a[i+2]!==b[i+2])changed++;return changed;};
+  try {
+    engine.refine();engine.draw(size);const initial=pixels();
+    assert(gl.getError()===gl.NO_ERROR,"Initial particle draw failed.");
+    assert(calls.length===6&&calls.every(call=>call.count===4&&call.instances===state.density),"Disk must consist of one quad per source particle per image order.");
+    assert(engine.metrics.diskRendering==="instanced-particles"&&engine.metrics.particleInstances===4000,"Particle count/readback mismatch.");
+    const builds=engine.metrics.geodesicBuilds,projections=engine.metrics.projectionBuilds;
+    engine.draw(size);assert(difference(initial,pixels())===0,"Frozen particle time must produce identical pixels.");
+    state.time=.15;engine.draw(size);const moved=pixels(),motionPixels=difference(initial,moved);
+    assert(motionPixels>100,"Live particles did not move.");
+    state.density=6000;engine.draw(size);const denser=pixels(),densityPixels=difference(moved,denser);
+    assert(densityPixels>100&&engine.metrics.particleInstances===6000,"Density must control actual drawn particles.");
+    assert(engine.metrics.geodesicBuilds===builds&&engine.metrics.projectionBuilds===projections,"Time/density changes must reuse geometry only.");
+    state.density=0;engine.draw(size);const sky=pixels(),diskPixels=difference(denser,sky);
+    assert(diskPixels>100,"Disk light must disappear when there are no particles.");
+    const center=(128*257+128)*4;
+    assert(sky[center]===0&&sky[center+1]===0&&sky[center+2]===0,"Captured sky stays black.");
+    state.density=4000;state.viewZoom=state.zoom=12;size.scale=257*.028*12;engine.refine();engine.draw(size);
+    const horizon=pixels();assert(horizon.every((value,i)=>i%4===3||value===0),"The journey endpoint must remain entirely black.");
+    assert(gl.getError()===gl.NO_ERROR,"GPU particle regression generated an error.");
+    result.textContent="PASS: live direct particles, exact source counts, frozen playback, geometry reuse, no texture disk without particles, and horizon fade.\n"+JSON.stringify({motionPixels,densityPixels,diskPixels,metrics:engine.metrics},null,2);
+  } finally {engine.dispose();}
+} catch(error){result.textContent="FAIL: "+error.message;}
+</script>
+</html>

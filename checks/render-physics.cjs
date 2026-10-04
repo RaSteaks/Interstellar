@@ -110,7 +110,10 @@ assert.ok(Math.max(...pair.hits.map(h=>h.shift))>Math.max(...mirror.hits.map(h=>
 const raytracer=fs.readFileSync(path.join(__dirname,'../dist/raytracer.js'),'utf8');
 assert.ok(/if\(escaped\)\{Geometry exit=metric\(x,uSpin\)/.test(raytracer),'the traced sky direction must use the coordinate velocity at the escape cutoff');
 const stages=[...raytracer.matchAll(/`#version 300 es[^`]*`/g)].map(match=>match[0]);
-assert.equal(stages.length,6);
+// Direct particle drawing adds inverse-geometry and particle stages; there is
+// no emission-atlas stage, and geometry data alone must not contain disk light.
+assert.equal(stages.length,8);
+assert.ok(!/uAtlas|atlasProgram|atlasVertex|vec4 emission\(/.test(raytracer),'disk emission must be rendered by particles, not an emission texture');
 for(const stage of stages){
  for(const pairName of ['{}','()']){
   const [open,close]=pairName;let depth=0;

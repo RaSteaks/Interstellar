@@ -64,10 +64,19 @@
     const integrate=key=>ray[key].map((value,i)=>value+h/6*(k1[key][i]+2*k2[key][i]+2*k3[key][i]+k4[key][i]));
     return {x:integrate("x"),p:integrate("p"),energy:ray.energy};
   }
+  function emitterVelocity(x,spin) {
+    const r=geometry(x,spin).r,v=globalThis.BlackHolePhysics.flowVelocity(r,spin);
+    const delta=r*r-2*r+spin*spin,ut=v.ut-2*r/delta*v.ur,uphi=v.uphi-spin/delta*v.ur;
+    // x+iy=(r-ia) exp(i phi_out): transform radial and angular velocity
+    // from Boyer-Lindquist into the Cartesian outgoing Kerr-Schild basis.
+    const radial=[(r*x[0]-spin*x[1])/(r*r+spin*spin),(spin*x[0]+r*x[1])/(r*r+spin*spin)];
+    return [v.ur*radial[0]-uphi*x[1],v.ur*radial[1]+uphi*x[0],0,ut];
+  }
   function hitRecord(x,p,energy,spin) {
-    const r=geometry(x,spin).r,omega=1/(r**1.5+spin);
-    const ut=(1+spin/r**1.5)/Math.sqrt(1-3/r+2*spin/r**1.5);
-    const angularMomentum=x[0]*p[1]-x[1]*p[0],emitterEnergy=ut*(energy+omega*angularMomentum);
+    const r=geometry(x,spin).r,u=emitterVelocity(x,spin);
+    // Rays point into the past, so p_mu u^mu is positive. Their initial
+    // observer-frame energy is one, giving g=1/(p_mu u^mu) even during infall.
+    const emitterEnergy=dot(p,u.slice(0,3))+energy*u[3];
     if(!(emitterEnergy>0))return null;
     const shift=1/emitterEnergy;
     return {r,phi:Math.atan2(x[1],x[0]),shift,mu:Math.min(1,Math.abs(p[2])*shift)};
@@ -146,5 +155,5 @@
       p+=h/6.*(p1+2.*p2+2.*p3+p4);
     }
   `;
-  globalThis.BlackHoleGeodesics=Object.freeze({geometry,metricDot,lower,observer,initialRay,hamiltonian,derivative,advance,hitRecord,skyDirection,trace,glsl});
+  globalThis.BlackHoleGeodesics=Object.freeze({geometry,metricDot,lower,observer,initialRay,hamiltonian,derivative,advance,emitterVelocity,hitRecord,skyDirection,trace,glsl});
 })();

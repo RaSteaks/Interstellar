@@ -8,12 +8,13 @@
     <meta name="description" content="全屏探索黑洞粒子吸积盘。背景为沿真实逃逸光线采样的星空，靠近阴影处随引力透镜弯曲；所有观测控制默认收起。" />
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308090d'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23efb77b' stroke-width='2'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='4' fill='none' stroke='%23efb77b' stroke-width='2' transform='rotate(-20 16 16)'/%3E%3C/svg%3E" />
     <link rel="stylesheet" href="./styles.css?v=04d3ec71087f" />
-    <script src="./physics.js" defer></script>
-    <script src="./geodesics.js" defer></script>
+    <!-- Physics and geometry are versioned together with the live particle renderer. -->
+    <script src="./physics.js?v=f95115eeb347" defer></script>
+    <script src="./geodesics.js?v=3994483f3e19" defer></script>
     <script src="./navigation.js?v=1582a69bfda7" defer></script>
     <!-- Refresh content hashes after script edits so each deployment loads its matching renderer. -->
-    <script src="./raytracer.js?v=7ab529cb6061" defer></script>
-    <script src="./app.js?v=47c9a8d7d879" defer></script>
+    <script src="./raytracer.js?v=352d044f1ce2" defer></script>
+    <script src="./app.js?v=9fc449c5eadf" defer></script>
   </head>
   <body>
     <main class="scene" id="scene" aria-label="黑洞观测站">
@@ -43,7 +44,8 @@
           <p class="interaction-help">单指拖动 · 双指捏合或滚轮缩放<br />放大螺旋靠近 · 缩小返回<br />方向键调视角 · 空格暂停 · Esc 收起或返回</p>
           <div class="panel-footer"><span id="render-state">实时粒子场</span><span id="particle-count">32,000 PT</span></div>
           <p class="status" id="status" role="status" aria-live="polite"></p>
-          <details class="model-notes"><summary>模型与参考</summary><p>史瓦西模型不旋转；克尔模型包含自旋。内侧稳定轨道与圆轨道角速度使用模型参数，r_g = GM/c²。</p><p>光线在 Kerr-Schild 度规中数值积分，粒子光沿光线路径采样并叠加吸收；薄盘通量参考 grtrans 的 Page–Thorne 模型。背景星空沿逃逸光线的真实方向采样，靠近阴影处可见引力透镜弯出的爱因斯坦环。配色和发射率经过归一化，使用薄盘、快速光照及两层标量传输，未包含偏振或 GRMHD 数据。兼容画面采用轨道投影。</p><p>放大时镜头绕转接近视界，进入视界阶段后画面渐黑；缩小或重置可以返回。这是镜头旅程演示，不计算视界内场景。</p><a href="https://github.com/baopinshui/NPGS/blob/master/NPGS/Sources/Engine/Shaders/BlackHole_common.glsl" target="_blank" rel="noopener noreferrer">NPGS / BlackHole_common.glsl</a><a href="https://github.com/jadexter/grtrans" target="_blank" rel="noopener noreferrer">grtrans / Jason Dexter</a><a href="https://arxiv.org/abs/1602.03184" target="_blank" rel="noopener noreferrer">Dexter (2016)</a><a href="https://arxiv.org/abs/0903.0620" target="_blank" rel="noopener noreferrer">Dexter &amp; Agol (2009)</a><a href="./notices.txt" target="_blank" rel="noopener noreferrer">参考与许可</a><a href="https://github.com/oseiskar/black-hole" target="_blank" rel="noopener noreferrer">oseiskar / black-hole</a><a href="https://github.com/Scenes3D/black-hole" target="_blank" rel="noopener noreferrer">Scenes3D / black-hole</a><a href="https://github.com/Niiflheim01/singularity" target="_blank" rel="noopener noreferrer">Niiflheim01 / singularity</a></details>
+          <!-- Describe the emitter model independently of the reversible camera journey. -->
+          <details class="model-notes"><summary>模型与参考</summary><p>史瓦西模型不旋转；克尔模型包含自旋。内侧稳定轨道与圆轨道角速度使用模型参数，r_g = GM/c²。</p><p>吸积盘由实时粒子绘制。内侧稳定轨道以内，粒子螺旋坠落；接近视界时，频移与光子捕获使可见光逐渐变暗。盘外辐射参考 Page–Thorne 模型，内侧辐射采用少量内缘应力与辐射压主导的简化模型。光线在 Kerr-Schild 度规中积分，背景星空随引力透镜弯曲。配色与亮度经过归一化，采用薄盘、快速光照与最近两次发光交点，未包含完整偏振或 GRMHD 演化。兼容画面采用粒子投影。</p><p>放大时镜头绕转接近视界，进入视界阶段后画面渐黑；缩小或重置可以返回。这是镜头旅程演示，不计算视界内场景。</p><a href="https://arxiv.org/abs/2405.09175" target="_blank" rel="noopener noreferrer">Mummery 等（2024）· ISCO 内的辐射</a><a href="https://github.com/baopinshui/NPGS/blob/master/NPGS/Sources/Engine/Shaders/BlackHole_common.glsl" target="_blank" rel="noopener noreferrer">NPGS / BlackHole_common.glsl</a><a href="https://github.com/jadexter/grtrans" target="_blank" rel="noopener noreferrer">grtrans / Jason Dexter</a><a href="https://arxiv.org/abs/1602.03184" target="_blank" rel="noopener noreferrer">Dexter (2016)</a><a href="https://arxiv.org/abs/0903.0620" target="_blank" rel="noopener noreferrer">Dexter &amp; Agol (2009)</a><a href="./notices.txt" target="_blank" rel="noopener noreferrer">参考与许可</a><a href="https://github.com/oseiskar/black-hole" target="_blank" rel="noopener noreferrer">oseiskar / black-hole</a><a href="https://github.com/Scenes3D/black-hole" target="_blank" rel="noopener noreferrer">Scenes3D / black-hole</a><a href="https://github.com/Niiflheim01/singularity" target="_blank" rel="noopener noreferrer">Niiflheim01 / singularity</a></details>
         </aside>
       </details>
       <noscript><p class="noscript">启用 JavaScript 后即可观测粒子黑洞。</p></noscript>

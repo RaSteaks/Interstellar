@@ -23,7 +23,8 @@
   let driftAngle = 0, driftRate = reducedMotion.matches?0:1, driftUntil = null;
   const markDriftInteraction = () => { driftUntil = performance.now(); };
 
-  // Fixed seeds keep density changes stable. Gaussian heights form a thin disk rather than a tube.
+  // Fixed seeds keep density changes stable. Heights belong to the Canvas
+  // fallback; the GPU particles share the ray tracer's zero-thickness disk.
   function randomGenerator(seed) {
     return () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
   }
@@ -59,7 +60,7 @@
     return {stars, blobs};
   })();
 
-  // Trace geometry only when camera/model parameters change; resolve animated light every frame.
+  // Cache only ray geometry; live GPU particles produce all disk light each frame.
   function createWebGLRenderer() {
     const engine=globalThis.BlackHoleRaytracer.create({canvas,particles,state,physics,onNeedsFrame:requestRender});
     return engine && {...engine,draw:seconds=>engine.draw(size,seconds)};
@@ -75,7 +76,7 @@
       draw() {
         const {width:w,height:h,scale,dpr}=size,model=physics.model(state);
         const cx=w*.5,cy=h*.5,shadowX=cx+model.offset*scale;
-        if(!profile||profile.spin!==model.spin)profile={...physics.diskProfile(model.spin,model.outer),spin:model.spin};
+        if(!profile||profile.spin!==model.spin)profile={...physics.emissionProfile(model.spin,model.outer),plunge:physics.plungeProfile(model.spin)};
         context.fillStyle="#08090d";context.fillRect(0,0,w,h);
         // Sky first: stars and the Milky-Way band sit behind halo, shadow and disk.
         const flight=navigation.view(state.viewZoom,state.reducedMotion),viewYaw=state.yaw+flight.orbit+state.drift;
@@ -107,9 +108,12 @@
         context.globalCompositeOperation="lighter";
         const tilt=state.tilt*Math.PI/180,inclination=Math.sin(tilt);
         for(let i=0;i<this.count();i++) {
-          const n=i*4,r=model.isco+.025+(model.outer-model.isco-.025)*particles[n];
-          const a=particles[n+1]+state.time*physics.angularVelocity(r,model.spin)*19-viewYaw;
-          const x=Math.cos(a)*r,y=Math.sin(a)*r,z=particles[n+2]*r*.024;
+          const n=i*4,orbit=physics.particleOrbit(particles.subarray(n,n+4),i,state.time,profile,profile.plunge),r=orbit.r,a=orbit.phi-viewYaw;
+          // Share the actual inward trajectories with WebGL. Only projection and
+          // lensing remain approximate in Canvas; the plunge never uses circular motion.
+          const height=orbit.plunging?model.isco*.024*(model.isco/r)**(-11/7)*(Math.abs(physics.flowVelocity(r,model.spin,profile.constants).ur)/physics.flow.radialSpeed)**(-1/7):r*.024;
+          const radial=Math.sqrt(r*r+model.spin*model.spin);
+          const x=Math.cos(a)*radial,y=Math.sin(a)*radial,z=particles[n+2]*height;
           const perspective=100/(100+y*Math.cos(tilt)-z*inclination);
           const px=x*perspective;
           let py=(y*inclination+z*Math.cos(tilt))*perspective;
@@ -117,9 +121,8 @@
           const hidden=Math.hypot((px-model.offset)/(1-.045*model.spin),py)<model.shadow;
           if(hidden && (y>0 || inclination>.84))continue;
           const thermal=Math.pow(physics.sampleProfile(profile,r),.25);
-          const gravitational=Math.sqrt(Math.max(1-3/r+2*model.spin/Math.pow(r,1.5),.01))/(1+model.spin/Math.pow(r,1.5));
-          const shift=Math.max(.18,Math.min(1.6,gravitational/(1+Math.sqrt(1/r)*Math.cos(tilt)*Math.cos(a))));
-          const alpha=Math.min(.85,(.30+particles[n+3]*.55)*Math.pow(thermal,.8)*Math.pow(shift,3));
+          const shift=Math.min(4,physics.compatibilityShift(r,a,tilt,model.spin,profile.constants));
+          const alpha=Math.min(.85,(.30+particles[n+3]*.55)*Math.pow(thermal,.8)*Math.pow(shift,4));
           context.fillStyle=`rgba(255,${95+Math.min(1,thermal*shift)*130},${25+Math.min(1,thermal*shift)*105},${alpha})`;
           context.beginPath();context.arc(cx+px*scale,cy-py*scale,dpr*(.55+particles[n+3]*.55),0,Math.PI*2);context.fill();
         }
@@ -204,7 +207,7 @@
     document.querySelector("#pause-label").textContent=state.paused?"播放":"暂停";
     document.querySelector("#pause-icon").setAttribute("d",state.paused?"M6 4l9 6-9 6Z":"M7 4v12M13 4v12");
     document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} PT`;
-    document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容画面":state.paused?"画面已暂停":"实时光线成像";
+    document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容画面":state.paused?"画面已暂停":"实时粒子成像";
     if(message)status.textContent=message;
   }
   function applySettings(settings,message) {

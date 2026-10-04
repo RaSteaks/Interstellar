@@ -38,7 +38,9 @@ try {
       engine.refine();engine.draw(size);
       const model=physics.model(state),camera=geodesics.observer(spin,tilt);
       const x=Math.round(128+alpha*16),y=Math.round(128+beta*16);
-      const expected=geodesics.trace(camera,alpha,beta,model.isco,model.outer);
+      // Emitters now extend through the plunge; CPU and GPU must use the same
+      // horizon cutoff when comparing the nearest two valid intersections.
+      const expected=geodesics.trace(camera,alpha,beta,model.emissionInner,model.outer);
       assert(expected.escaped&&expected.hits.length>=2,"Invalid CPU witness.");
       const framebuffer=[...attachments].find(([,slots])=>slots.size===3)?.[0];
       assert(framebuffer,"Ray map framebuffer missing.");
@@ -55,9 +57,25 @@ try {
       // sky escape and that later crossings did not replace the nearest pair.
       assert(values[2][3]>.99,`a=${spin}: disk cache incorrectly suppresses the sky.`);
       for(let hit=0;hit<2;hit++)assert(Math.abs(values[hit][0]-expected.hits[hit].r)<.04,`a=${spin}: cached hit ${hit+1} is not the nearest disk crossing.`);
+      for(let hit=0;hit<2;hit++)assert(Math.abs(values[hit][2]-expected.hits[hit].shift)<.02,`a=${spin}: infall frequency shift disagrees with CPU.`);
       reports.push({spin,tilt,cpuCrossings:expected.hits.length,gpuCachedRadii:values.slice(0,2).map(hit=>hit[0]),skyEscape:values[2][3]});
     }
-    result.textContent="PASS: actual GPU sky escape and nearest-two disk cache.\n"+JSON.stringify(reports,null,2);
+    // These witnesses emit strictly between ISCO and the horizon, so matching
+    // g tests the radial-velocity branch rather than only circular disk motion.
+    for(const [spin,alpha,beta] of [[0,-2,4],[.65,0,4],[.95,-2,0]]) {
+      Object.assign(state,{model:spin===0?"schwarzschild":"kerr",spin,tilt:18});
+      engine.refine();engine.draw(size);
+      const model=physics.model(state),expected=geodesics.trace(geodesics.observer(spin,18),alpha,beta,model.emissionInner,model.outer).hits[0];
+      assert(expected&&expected.r<model.isco&&expected.shift<.3,"Invalid plunging-region witness.");
+      gl.bindFramebuffer(gl.FRAMEBUFFER,[...attachments].find(([,slots])=>slots.size===3)[0]);
+      gl.readBuffer(gl.COLOR_ATTACHMENT0);const hit=new Float32Array(4);
+      gl.readPixels(Math.round(128+alpha*16),Math.round(128+beta*16),1,1,gl.RGBA,gl.FLOAT,hit);
+      assert(gl.getError()===gl.NO_ERROR,"Plunge readback failed.");
+      assert(Math.abs(hit[0]-expected.r)<.04&&Math.abs(hit[2]-expected.shift)<.01,"GPU infall redshift differs from the normalized CPU emitter.");
+      reports.push({spin,infallRadius:hit[0],infallShift:hit[2],cpuShift:expected.shift});
+      gl.bindFramebuffer(gl.FRAMEBUFFER,null);
+    }
+    result.textContent="PASS: actual GPU sky escape, nearest-two disk cache and plunging-region frequency shifts.\n"+JSON.stringify(reports,null,2);
   } finally {engine.dispose();}
 } catch(error){result.textContent="FAIL: "+error.message;}
 </script>
