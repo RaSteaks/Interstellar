@@ -81,7 +81,7 @@ components:
 | Scrollbar | styles.css 全局 token | :root 与 DESIGN.md | 手机面板独立滚动 | 手机无横向溢出、Esc |
 | Toast | app.js status、flightStatus | 共享更新及数据状态 | 原生 polite live region | 加载/失败、参数恢复反馈 |
 
-初始类星体场景的盘面仰角为0°，首次加载、重置及重新选择该场景均恢复此值。初始不选中命名视角预设；电影视角18°和俯瞰视角78°保留各自的明确角度。
+初始类星体场景的盘面仰角为8°，首次加载、重置及重新选择该场景均恢复此值。初始不选中命名视角预设；电影视角18°和俯瞰视角78°保留各自的明确角度。
 
 ### Motion
 

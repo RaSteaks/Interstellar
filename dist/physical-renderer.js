@@ -11,7 +11,10 @@
     // the ambient motion stays continuous at a few retraces per second instead of
     // one retrace per frame. See driftStep in render().
     const DRIFT_RETRACE_PIXELS=12;
-    const metrics={mode:"webgl2-volume-grrt",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceQuality:"interactive",raySamples:0,unfinishedRays:0,invalidRays:0,observerDistance:80,observerKind:"infall",horizonFade:0,stokes:true,timeDependent:true,fluid:"thermal",dataStatus:"idle",frameMs:0,sourceParticles:0};
+    // Keep the CPU packing, RGBA32F byte accounting and shader frame budget in
+    // lockstep; a solver record is 12 interleaved values per 64×64 cell.
+    const MAX_FLUID_FRAMES=169,MAX_DYNAMIC_SLOTS=128,HISTORY_WIDTH=64,HISTORY_CELLS=HISTORY_WIDTH*HISTORY_WIDTH,RECORD_COMPONENTS=12,RGBA_COMPONENTS=4;
+    const metrics={mode:"webgl2-volume-grrt",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceQuality:"interactive",raySamples:0,unfinishedRays:0,invalidRays:0,observerDistance:80,observerKind:"infall",horizonFade:0,stokes:true,timeDependent:true,fluid:"thermal",dataStatus:"idle",frameMs:0,sourceParticles:0,historyEndTime:800,latestSimulationTime:800,observationTime:null,solverProgressTime:800,solverStepRate:0,continuationStatus:"idle",cacheSlots:MAX_DYNAMIC_SLOTS,historyMissing:false};
     const vertex=`#version 300 es
       layout(location=0) in vec2 aPosition;out vec2 vUv;
       void main(){vUv=aPosition*.5+.5;gl_Position=vec4(aPosition,0.,1.);}
@@ -24,7 +27,8 @@
       uniform int uFlow,uBand,uPolarization,uMaxSteps,uFrameCount,uHotspot,uSkyEnabled;
       uniform sampler2D uDisk,uSpectrum,uBessel,uTheta;
       uniform sampler2DArray uFluid,uVelocity,uMagnetic;
-      uniform float uTimes[42];uniform vec2 uGrid;  // 42 is the frame cap requestSimulation enforces
+      const int MAX_FLUID_FRAMES=169; // 41 historical layers + 128 logical-time slots
+      uniform float uTimes[MAX_FLUID_FRAMES];uniform int uLayers[MAX_FLUID_FRAMES];uniform vec2 uGrid;
       ${R.glsl}
       ${P.glsl}
       const float PI=3.141592653589793;
@@ -70,10 +74,11 @@
       float planck(float nu,float t){return plasmaPlanck(nu,t);}
       vec3 bessel(float theta){return texture(uBessel,vec2((clamp((log(theta)/log(10.)+1.3)/5.3,0.,1.)*383.+.5)/384.,.5)).xyz;}
       vec4 fluidSample(sampler2DArray tex,vec2 uv,float time){
+        if(uFrameCount<1||time<uTimes[0]||time>uTimes[uFrameCount-1])return vec4(0.);
         int lo=0,hi=uFrameCount-1;
-        for(int j=0;j<6;j++){int mid=(lo+hi)/2;if(uTimes[mid]<=time)lo=mid;else hi=mid;}
+        for(int j=0;j<8;j++){int mid=(lo+hi)/2;if(uTimes[mid]<=time)lo=mid;else hi=mid;}
         int next=min(lo+1,uFrameCount-1);float f=clamp((time-uTimes[lo])/max(.0001,uTimes[next]-uTimes[lo]),0.,1.);
-        return mix(texture(tex,vec3(uv,float(lo))),texture(tex,vec3(uv,float(next))),f);
+        return mix(texture(tex,vec3(uv,float(uLayers[lo]))),texture(tex,vec3(uv,float(uLayers[next]))),f);
       }
       vec4 cartesian(vec4 spherical,vec3 x,float r,float a){
         float ct=clamp(x.z/r,-1.,1.),st=max(1e-10,length(x.xy)/sqrt(r*r+a*a));
@@ -450,8 +455,8 @@
     const diskCount=2048,diskTexture=texture(diskCount,1),spectrumTexture=texture(768,1),besselTexture=texture(384,1,P.besselTable());
     const thetaData=new Float32Array(512*4);
     for(let i=0;i<512;i++){const angle=i/511;let lo=0,hi=1;for(let j=0;j<40;j++){const t=(lo+hi)/2;if(t+.7/(2*Math.PI)*Math.sin(2*Math.PI*t)>angle)hi=t;else lo=t;}thetaData[i*4]=(lo+hi)/2;}
-    const thetaTexture=texture(512,1,thetaData),empty=texture(1,1,new Float32Array(4),1);
-    let fluidTextures=[empty,empty,empty],simulation=null,loading=null,disposed=false,target=null,profile=null,profileKey="",geometryKey="",lastTime=-1,refined=false,refinementDue=false,timer=0,ema=25,frameCounter=0,lastWall=null,budgetScale=1,lastInteractive=false,lastActive=false,renderVersion=0,gpuPollTimer=0;
+    const thetaTexture=texture(512,1,thetaData),empty=texture(1,1,new Float32Array(4),1),emptyFluidFrames={times:new Float32Array([0]),layers:new Int32Array([0]),count:1};
+    let fluidTextures=[empty,empty,empty],simulation=null,continuation=null,historyFrameCount=0,fluidLayerCount=1,dynamicFrames=new Map(),fluidFrameCache=null,fluidFrameCacheDirty=true,loading=null,disposed=false,target=null,profile=null,profileKey="",geometryKey="",lastTime=-1,refined=false,refinementDue=false,timer=0,ema=25,frameCounter=0,lastWall=null,budgetScale=1,lastInteractive=false,lastActive=false,renderVersion=0,gpuPollTimer=0;
     let cachedModel=null,modelKey="",cachedCamera=null,cameraKey="",driftStep=1e-4;
     const profileCache=new Map(),spectrumCache=new Map(),gpuJobs=[];
     metrics.timingSource=gpuTimer?"gpu-query-pending":"cpu-submission";metrics.traceTimingSource=metrics.timingSource;metrics.compositeTimingSource=metrics.timingSource;metrics.endToEndTimingSource="cpu-submission";metrics.timingSamples=[];metrics.renderVersion=0;metrics.diagnosticPending=false;metrics.modelBuilds=0;metrics.profileBuilds=0;metrics.observerBuilds=0;metrics.spectrumBuilds=0;
@@ -459,6 +464,7 @@
     // configuration never gains accuracy, camera, emissivity or oracle switches.
     const verificationKey=JSON.stringify(verification);
     function boundedCache(cache,key,value){cache.delete(key);cache.set(key,value);if(cache.size>8)cache.delete(cache.keys().next().value);return value;}
+    function invalidateFluidFrameCache(){fluidFrameCacheDirty=true;}
     function sceneModel(){
       const key=[state.scene,state.model,state.spin,state.charge,verificationKey].join(":");
       if(key!==modelKey){
@@ -473,17 +479,56 @@
       if(key!==cameraKey){cameraKey=key;cachedCamera=A.camera(state,m);metrics.observerBuilds++;}return cachedCamera;
     }
     function requestSimulation(){
-      if(loading)return loading;metrics.dataStatus="loading";onStatus?.("正在载入热流模拟片段。");
+      if(loading)return loading;metrics.dataStatus="loading";onStatus?.("正在载入热流历史与持续求解器。");
       loading=P.loadSimulation().then(data=>{
-        if(disposed)return;simulation=data;const {records,metadata}=data,n=records.length/12;
-        // The shader's uTimes is a fixed-size uniform array; fail loudly instead of
-        // silently sampling the wrong frames if the movie ever grows.
-        if(metadata.times.length>42)throw new Error("GRMHD movie has more frames than uTimes[42] supports");
-        fluidTextures=Array.from({length:3},(_,field)=>{const packed=field===1?P.velocityTexture(records,metadata):new Float32Array(n*4);if(field!==1)for(let i=0;i<n;i++)packed.set(records.subarray(i*12+field*4,i*12+field*4+4),i*4);return texture(64,64,packed,metadata.times.length);});
-        metrics.dataStatus="ready";metrics.grmhdResolution=metadata.resolution;metrics.grmhdFrames=metadata.times.length;metrics.grmhdSpin=metadata.spin;onStatus?.("热流模拟已载入，可切换强度与偏振观察。");geometryKey="";onNeedsFrame();
-      }).catch(error=>{loading=null;if(disposed)return;metrics.dataStatus="error";onStatus?.("热流模拟未能载入，请选择热盘场景或刷新重试。");console.error("GRMHD movie unavailable",error);onNeedsFrame();});return loading;
+        if(disposed)return;const {records,metadata}=data,n=records.length/RECORD_COMPONENTS,nextHistoryFrameCount=metadata.times.length,nextFluidLayerCount=nextHistoryFrameCount+MAX_DYNAMIC_SLOTS;
+        // Validate the layer budget and record count before publishing the new
+        // object; a rejected dataset must never leave render() in GRMHD mode.
+        if(nextFluidLayerCount>MAX_FLUID_FRAMES)throw new Error("GRMHD history and cache exceed the shader frame budget");
+        if(n!==HISTORY_CELLS*nextHistoryFrameCount)throw new Error("GRMHD history has an unexpected record count");
+        simulation=data;historyFrameCount=nextHistoryFrameCount;fluidLayerCount=nextFluidLayerCount;
+        metrics.solverTextureBytes=3*HISTORY_WIDTH*HISTORY_WIDTH*fluidLayerCount*RGBA_COMPONENTS*Float32Array.BYTES_PER_ELEMENT;metrics.solverCpuCacheBytes=MAX_DYNAMIC_SLOTS*HISTORY_CELLS*RECORD_COMPONENTS*Float32Array.BYTES_PER_ELEMENT;metrics.solverMemoryBytes=metrics.solverTextureBytes+metrics.solverCpuCacheBytes;
+        fluidTextures=Array.from({length:3},(_,field)=>{
+          const packed=field===1?P.velocityTexture(records,metadata):new Float32Array(n*RGBA_COMPONENTS);
+          if(field!==1)for(let i=0;i<n;i++)packed.set(records.subarray(i*RECORD_COMPONENTS+field*RGBA_COMPONENTS,i*RECORD_COMPONENTS+field*RGBA_COMPONENTS+RGBA_COMPONENTS),i*RGBA_COMPONENTS);
+          const layers=new Float32Array(HISTORY_CELLS*fluidLayerCount*RGBA_COMPONENTS);layers.set(packed);
+          return texture(HISTORY_WIDTH,HISTORY_WIDTH,layers,fluidLayerCount);
+        });
+        metrics.dataStatus="ready";metrics.grmhdResolution=metadata.resolution;metrics.grmhdFrames=metadata.times.length;metrics.grmhdSpin=metadata.spin;metrics.historyEndTime=metadata.times[metadata.times.length-1];metrics.latestSimulationTime=metrics.historyEndTime;metrics.solverProgressTime=metrics.historyEndTime;metrics.cacheSlots=MAX_DYNAMIC_SLOTS;
+        dynamicFrames.clear();invalidateFluidFrameCache();geometryKey="";
+        const factory=globalThis.BlackHoleGrmhdContinuation;
+        if(factory){
+          const checkpoint=metadata.checkpoint;
+          continuation=factory.create({
+            historyEndTime:metrics.historyEndTime,
+            workerUrl:"./grmhd-worker.js?v=a230423bb1bd",
+            wasmUrl:"./solver/grmhd-runtime.wasm?v=595230cc66eb",
+            checkpointUrl:"./data/grmhd-torus.checkpoint.bin.gz?v=cca0365c3cb7",
+            checkpointSpec:{sha256:checkpoint?.sha256,time:checkpoint?.time,stateCount:checkpoint?.stateCount,boundaryRows:checkpoint?.boundaryRows,boundaryWidth:checkpoint?.boundaryWidth,cells:metadata.resolution?.[0]*metadata.resolution?.[1],components:metadata.components?.length},
+            onReady:info=>{metrics.continuationStatus="ready";metrics.solverProgressTime=Math.max(metrics.solverProgressTime,info.time);metrics.solverDiagnosticNames=info.diagnosticNames||[];onStatus?.("热流检查点已恢复；播放会在后台分批推进。");onNeedsFrame();},
+            onProgress:info=>{metrics.continuationStatus=info.status;metrics.solverProgressTime=Math.max(metrics.solverProgressTime,info.latestTime||info.simulationTime||metrics.solverProgressTime);metrics.solverStepRate=info.stepRate||0;metrics.pendingSnapshots=info.pendingSnapshots||0;onNeedsFrame();},
+            onSnapshot:entry=>{if(!uploadDynamicSnapshot(entry))return;metrics.solverDiagnostics=entry.diagnostics;metrics.latestSimulationTime=Math.max(metrics.latestSimulationTime,entry.time);onNeedsFrame();},
+            onError:error=>{metrics.continuationStatus=error.kind==="load"?"unavailable":"failed";metrics.continuationError=error.message;metrics.continuationFallback=true;onStatus?.(error.kind==="load"?"持续求解器未能加载，已回退到有限片段播放。":"持续求解器停止，保留最后有效画面并回退到有限片段。");onNeedsFrame();}
+          });
+          metrics.continuationStatus="loading";
+          continuation.start();
+        } else {
+          metrics.continuationStatus="unavailable";metrics.continuationFallback=true;onStatus?.("当前浏览器不支持持续求解，已回退到有限片段播放。");
+        }
+        onStatus?.("热流历史已载入；播放可继续生成 t>800 的状态。");onNeedsFrame();
+      }).catch(error=>{loading=null;if(disposed)return;simulation=null;fluidTextures=[empty,empty,empty];historyFrameCount=0;fluidLayerCount=1;dynamicFrames.clear();invalidateFluidFrameCache();metrics.dataStatus="error";metrics.continuationStatus="unavailable";onStatus?.("热流历史未能载入，请选择热盘场景或刷新重试。");console.error("GRMHD history unavailable",error);onNeedsFrame();});return loading;
     }
     function upload(t,width,data){gl.bindTexture(gl.TEXTURE_2D,t);gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,width,1,gl.RGBA,gl.FLOAT,data);}
+    function uploadLayer(t,layer,data){gl.bindTexture(gl.TEXTURE_2D_ARRAY,t);gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,layer,HISTORY_WIDTH,HISTORY_WIDTH,1,gl.RGBA,gl.FLOAT,data);}
+    function uploadDynamicSnapshot(entry){
+      if(!simulation||entry.records.length!==HISTORY_CELLS*RECORD_COMPONENTS)return false;
+      const layer=historyFrameCount+(entry.slot%MAX_DYNAMIC_SLOTS),records=entry.records,fluid=new Float32Array(HISTORY_CELLS*RGBA_COMPONENTS),velocity=P.velocityTexture(records,simulation.metadata),magnetic=new Float32Array(HISTORY_CELLS*RGBA_COMPONENTS);
+      // Worker snapshots stay interleaved by cell; gather each RGBA field just
+      // as the historical upload does instead of slicing the first 4096 cells.
+      for(let i=0;i<HISTORY_CELLS;i++){const offset=i*RECORD_COMPONENTS;fluid.set(records.subarray(offset,offset+RGBA_COMPONENTS),i*RGBA_COMPONENTS);magnetic.set(records.subarray(offset+2*RGBA_COMPONENTS,offset+3*RGBA_COMPONENTS),i*RGBA_COMPONENTS);}
+      uploadLayer(fluidTextures[0],layer,fluid);uploadLayer(fluidTextures[1],layer,velocity);uploadLayer(fluidTextures[2],layer,magnetic);
+      dynamicFrames.set(entry.slot%MAX_DYNAMIC_SLOTS,{...entry,layer});if(dynamicFrames.size>MAX_DYNAMIC_SLOTS)dynamicFrames.delete(dynamicFrames.keys().next().value);invalidateFluidFrameCache();geometryKey="";return true;
+    }
     function sampler(p,name,unit,t,array=false){if(p.u[name]===undefined)return;gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(array?gl.TEXTURE_2D_ARRAY:gl.TEXTURE_2D,t);gl.uniform1i(p.u[name],unit);}
     function discardTarget(){
       if(!target)return;
@@ -553,6 +598,24 @@
       gl.readBuffer(gl.COLOR_ATTACHMENT2);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,0);gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);
       const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);enqueueJob({kind:"diagnostic",buffer,fence,length,version:renderVersion,time:state.time,frame:frameCounter});metrics.diagnosticPending=true;
     }
+    function fluidFrameUniforms(){
+      if(!simulation)return emptyFluidFrames;
+      if(!fluidFrameCacheDirty&&fluidFrameCache)return fluidFrameCache;
+      const dynamic=Array.from(dynamicFrames.values()).sort((a,b)=>a.time-b.time);
+      // Once the circular cache has moved past a gap, retaining the old 0–800
+      // history would make the shader interpolate across missing physical time.
+      // Dropping that history makes the gap explicit: out-of-window emission is
+      // zero and the UI reports a history-missing diagnostic.
+      const keepHistory=!dynamic.length||dynamic[0].time<=metrics.historyEndTime+20.0001;
+      const frames=[];
+      if(keepHistory)for(let i=0;i<historyFrameCount;i++)frames.push({time:simulation.metadata.times[i],layer:i});
+      for(const entry of dynamic)frames.push({time:entry.time,layer:entry.layer});
+      frames.sort((a,b)=>a.time-b.time);
+      const count=Math.min(MAX_FLUID_FRAMES,frames.length),times=new Float32Array(MAX_FLUID_FRAMES),layers=new Int32Array(MAX_FLUID_FRAMES);
+      for(let i=0;i<count;i++){times[i]=frames[i].time;layers[i]=frames[i].layer;}
+      metrics.historyMissing=Boolean(dynamic.length&&!keepHistory);
+      fluidFrameCache={times,layers,count};fluidFrameCacheDirty=false;return fluidFrameCache;
+    }
     function render(size,quality){
       const started=performance.now(),m=sceneModel(),camera=observer(m);updateProfile(m);
       const requested=state.density||160000,budget=verification.rayBudget??Math.min(quality?requested*2:Math.max(16000,requested*budgetScale),quality?650000:240000,size.width*size.height);
@@ -566,24 +629,31 @@
       // instead would lurch by a large fraction of the viewport at wide framing.
       driftStep=DRIFT_RETRACE_PIXELS*(size.dpr||1)/(lens*Math.max(1e-6,camera.r));
       gl.uniform2f(u.uExtent,size.width/lens,size.height/lens);gl.uniform2f(u.uConstants,profile.constants.energy,profile.constants.angularMomentum);
-      // The observation event's KS time shifts the retarded fluid/spot time.
-      const simulationTime=350+state.time*8+camera.coordinateTime,rhoUnit=simulation?m.massRate/(simulation.metadata.accretionRateCode*m.rg*m.rg*A.constants.c)*.001:0;
-      const values={uDistance:camera.r,uSpin:m.spin,uCharge:m.charge,uHorizon:m.horizon,uIsco:m.isco,uInner:profile.inner,uOuter:m.outer,uTime:m.flow==="grmhd"?Math.min(770,simulationTime):simulationTime,uRg:m.rg*100,uDensityUnit:rhoUnit,uSpectrumReference:profile.reference,uTolerance:verification.tolerance??(quality?4e-5:1.5e-4),uChart:camera.chart,uRadialSpeed:profile.constants.radialSpeed,uElectronRatio:m.electronRatio||40,uMediumStep:verification.mediumStep??(quality?.45:1),uDiskCount:diskCount,uDiskSplit:profile.iscoIndex??0,uSkyRadius:m.skyRadius??150,uEmissionScale:verification.emissionEnabled===false?0:1,uFarStep:verification.farStep??.22,uInitialStep:verification.initialStep??(m.flow==="thermal"&&camera.r>m.outer?Math.max(.8,.1*(camera.r-m.outer)):.8)};
+      // The observation event's KS time shifts the retarded fluid time.  The
+      // renderer never extrapolates beyond the newest complete solver snapshot.
+      const observationTime=350+state.time*8+camera.coordinateTime,availableTime=metrics.latestSimulationTime??metrics.historyEndTime,simulationTime=m.flow==="grmhd"?Math.min(observationTime,availableTime):observationTime,rhoUnit=simulation?m.massRate/(simulation.metadata.accretionRateCode*m.rg*m.rg*A.constants.c)*.001:0;
+      const values={uDistance:camera.r,uSpin:m.spin,uCharge:m.charge,uHorizon:m.horizon,uIsco:m.isco,uInner:profile.inner,uOuter:m.outer,uTime:simulationTime,uRg:m.rg*100,uDensityUnit:rhoUnit,uSpectrumReference:profile.reference,uTolerance:verification.tolerance??(quality?4e-5:1.5e-4),uChart:camera.chart,uRadialSpeed:profile.constants.radialSpeed,uElectronRatio:m.electronRatio||40,uMediumStep:verification.mediumStep??(quality?.45:1),uDiskCount:diskCount,uDiskSplit:profile.iscoIndex??0,uSkyRadius:m.skyRadius??150,uEmissionScale:verification.emissionEnabled===false?0:1,uFarStep:verification.farStep??.22,uInitialStep:verification.initialStep??(m.flow==="thermal"&&camera.r>m.outer?Math.max(.8,.1*(camera.r-m.outer)):.8)};
       for(const [name,value] of Object.entries(values))if(u[name]!=null)gl.uniform1f(u[name],value);
       gl.uniform1i(u.uFlow,m.flow==="vacuum"?0:m.flow==="grmhd"?(simulation?2:0):1);
       gl.uniform1i(u.uBand,["visible","xray","radio","bolometric"].indexOf(state.band));if(u.uPolarization!=null)gl.uniform1i(u.uPolarization,m.flow==="grmhd"||state.display!=="intensity"?1:0);
       gl.uniform1i(u.uMaxSteps,verification.maxSteps??(quality?2048:1200));gl.uniform1i(u.uHotspot,state.scene==="hotspot"?1:0);gl.uniform1i(u.uSkyEnabled,verification.skyEnabled===false?0:1);
-      if(u.uTimes!=null){const times=new Float32Array(42);if(simulation){times.set(simulation.metadata.times);gl.uniform2f(u.uGrid,simulation.metadata.radialStart,simulation.metadata.radialStep);}else{times[0]=0;gl.uniform2f(u.uGrid,0,1);}gl.uniform1fv(u.uTimes,times);gl.uniform1i(u.uFrameCount,simulation?simulation.metadata.times.length:1);}
+      if(u.uTimes!=null){const frames=fluidFrameUniforms();if(simulation)gl.uniform2f(u.uGrid,simulation.metadata.radialStart,simulation.metadata.radialStep);else{frames.times[0]=0;frames.layers[0]=0;gl.uniform2f(u.uGrid,0,1);}gl.uniform1fv(u.uTimes,frames.times);if(u.uLayers)gl.uniform1iv(u.uLayers,frames.layers);gl.uniform1i(u.uFrameCount,frames.count);}
       sampler(p,"uDisk",0,diskTexture);sampler(p,"uSpectrum",1,spectrumTexture);sampler(p,"uBessel",2,besselTexture);sampler(p,"uTheta",3,thetaTexture);["uFluid","uVelocity","uMagnetic"].forEach((name,i)=>sampler(p,name,4+i,fluidTextures[i],true));
       const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"trace",performance.now()-started);
       metrics.geodesicBuilds++;metrics.traceWidth=width;metrics.traceHeight=height;metrics.raySamples=width*height;metrics.traceQuality=quality?"refined":"interactive";metrics.transferMode=scalar?"scalar-intensity":"full-stokes";metrics.geodesicStepper=verification.forceUnseededBS?"bs32-unseeded":"bs32-fsal";
-      metrics.observerDistance=camera.r;metrics.initialObserverDistance=m.initialObserverDistance??80;metrics.computationalRadius=m.outer;metrics.skyRadius=m.skyRadius??150;metrics.observerKind=state.observer;metrics.horizonFade=0;metrics.fluid=m.flow;metrics.simulationTime=m.flow==="grmhd"?Math.min(770,simulationTime):null;metrics.movieEnded=m.flow==="grmhd"&&simulationTime>=770;metrics.cameraProperTime=camera.properTime;
+      metrics.observerDistance=camera.r;metrics.initialObserverDistance=m.initialObserverDistance??80;metrics.computationalRadius=m.outer;metrics.skyRadius=m.skyRadius??150;metrics.observerKind=state.observer;metrics.horizonFade=0;metrics.fluid=m.flow;metrics.observationTime=m.flow==="grmhd"?observationTime:null;metrics.simulationTime=m.flow==="grmhd"?simulationTime:null;metrics.waitingForData=m.flow==="grmhd"&&observationTime>availableTime+1e-6;metrics.movieEnded=m.flow==="grmhd"&&(metrics.continuationStatus==="unavailable"||metrics.continuationStatus==="failed")&&observationTime>=availableTime;metrics.cameraProperTime=camera.properTime;
       // Production readback is PBO/fence based; tests use readback() below to
       // obtain all channels synchronously and update exact status counts.
       queueDiagnostic();
     }
     function draw(size,seconds=0){
       if(disposed)return;frameCounter++;const started=performance.now(),duration=lastWall===null?0:started-lastWall;lastWall=started;
+      const currentModel=sceneModel();
+      if(currentModel.flow==="grmhd"&&simulation&&continuation){
+        const solverActive=!state.paused&&!document.hidden;
+        continuation.setActive(solverActive);
+        if(solverActive){const eventTime=350+state.time*8+observer(currentModel).coordinateTime;continuation.advanceTo(eventTime+40);}
+      } else continuation?.setActive(false);
       // Idle drift advances the camera azimuth continuously, so the retrace gate
       // quantizes it to driftStep (about DRIFT_RETRACE_PIXELS output pixels) rather
       // than to a fixed angle. View changes coarser than that still retrace exactly.
@@ -608,8 +678,13 @@
       if(!verification.disableTimers){const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);enqueueJob({kind:"endToEnd",fence,start:started,version:renderVersion,frame:frameCounter});gl.flush();}else timing("endToEnd",performance.now()-started,"cpu-submission",renderVersion,frameCounter);
       metrics.frameMs=ema;metrics.budgetScale=budgetScale;metrics.displayGain=displayGain;metrics.radianceReference=profile.reference;metrics.frames++;
     }
-    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();textures.forEach(t=>gl.deleteTexture(t));textures.clear();resources.reverse().forEach(f=>f());}
-    return {kind:"webgl",physical:true,metrics,count:()=>metrics.raySamples,draw,refine(){refinementDue=true;onNeedsFrame();},dispose,
+    function resetSimulation(){
+      dynamicFrames.clear();invalidateFluidFrameCache();geometryKey="";metrics.latestSimulationTime=metrics.historyEndTime;metrics.solverProgressTime=metrics.historyEndTime;metrics.observationTime=null;metrics.simulationTime=null;metrics.historyMissing=false;metrics.waitingForData=false;
+      continuation?.reset();onNeedsFrame();
+    }
+    function setSolverActive(value){continuation?.setActive(Boolean(value));}
+    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();textures.forEach(t=>gl.deleteTexture(t));textures.clear();resources.reverse().forEach(f=>f());}
+    return {kind:"webgl",physical:true,metrics,count:()=>metrics.raySamples,draw,resetSimulation,setSolverActive,refine(){refinementDue=true;onNeedsFrame();},dispose,
       // Full synchronous test readback intentionally waits for GPU completion;
       // production diagnostics above never issue a blocking typed-array read.
       readback(){if(!target)return null;gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);gl.bindFramebuffer(gl.FRAMEBUFFER,target.fbo);const outputs=target.images.map((_,i)=>{const data=new Float32Array(target.width*target.height*4);gl.readBuffer(gl.COLOR_ATTACHMENT0+i);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,data);return data;});gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.bindFramebuffer(gl.FRAMEBUFFER,null);diagnosticMetrics(outputs[2],renderVersion,state.time);return {width:target.width,height:target.height,renderVersion,radiance:outputs[0],stokes:outputs[1],diagnostic:outputs[2]};}};

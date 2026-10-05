@@ -37,6 +37,29 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
    return {difference,changed,build,before,after:engine.metrics.geodesicBuilds};
   });
   assert.ok(temporal.difference>1);assert.equal(temporal.changed,0);assert.equal(temporal.before,temporal.after);report.temporal=temporal;
+  const continuation=await gpu.evaluate(async()=>{
+   const snapshots=[],errors=[];
+   const metadata=await fetch('../dist/data/grmhd-torus.json').then(response=>response.json());
+   // Pass the dataset shape as well as its digest so the worker can validate
+   // regenerated checkpoints without hard-coding this one history.
+   const checkpointSpec={...metadata.checkpoint,cells:metadata.resolution[0]*metadata.resolution[1],components:metadata.components.length};
+   const checkpointTime=metadata.times[metadata.times.length-1];
+   const solver=BlackHoleGrmhdContinuation.create({
+    historyEndTime:checkpointTime,
+    workerUrl:'../dist/grmhd-worker.js',
+    wasmUrl:'../dist/solver/grmhd-runtime.wasm',
+    checkpointUrl:'../dist/data/grmhd-torus.checkpoint.bin.gz',
+    checkpointSpec,
+    onSnapshot:entry=>snapshots.push({time:entry.time,diagnostics:entry.diagnostics}),
+    onError:error=>errors.push(error)
+   });
+   solver.start();solver.advanceTo(820);await new Promise(resolve=>setTimeout(resolve,100));const pausedAt=solver.latest();
+   solver.setActive(true);solver.advanceTo(840);const deadline=performance.now()+10000;while(performance.now()<deadline&&solver.latest()<840)await new Promise(resolve=>setTimeout(resolve,20));
+   const computedAt=solver.latest(),firstSnapshot=snapshots[0]||null;
+   solver.reset();const resetDeadline=performance.now()+3000;while(performance.now()<resetDeadline&&(solver.status!=='ready'||solver.latest()!==checkpointTime))await new Promise(resolve=>setTimeout(resolve,20));
+   const resetAt=solver.latest(),status=solver.status;solver.destroy();return {checkpointTime,pausedAt,computedAt,resetAt,status,snapshots:snapshots.length,firstSnapshot,errors};
+  });
+  assert.equal(continuation.errors.length,0,JSON.stringify(continuation));assert.equal(continuation.pausedAt,continuation.checkpointTime);assert.ok(continuation.computedAt>=continuation.checkpointTime+40,JSON.stringify(continuation));assert.ok(continuation.snapshots>0);assert.ok(continuation.firstSnapshot.diagnostics[1]===1);assert.equal(continuation.resetAt,continuation.checkpointTime);assert.equal(continuation.status,'ready');report.continuation=continuation;
   const coefficients=await gpu.evaluate(()=>probeCoefficients());
   for(let i=0;i<4;i++)if(coefficients.cpu.j[i]!==0)assert.ok(Math.abs(coefficients.gpu[0][i]/coefficients.cpu.j[i]-1)<.001);
   for(const [actual,expected] of [[coefficients.gpu[1][0],coefficients.cpu.planck],[coefficients.gpu[1][1],coefficients.cpu.rho[0]],[coefficients.gpu[1][2],coefficients.cpu.rho[2]],[coefficients.gpu[1][3],coefficients.cpu.hotPlanck]])assert.ok(Math.abs(actual/expected-1)<.001);
@@ -61,9 +84,12 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   // check covers the same keyboard/focus path as a person using the panel.
   const openGroup=async id=>{const group=page.locator(`#${id}`);if(!(await group.getAttribute('open')))await group.locator('summary').click();};
   let obs=await observe();assert.equal(obs.render.mode,'webgl2-volume-grrt');assert.equal(obs.controlsExpanded,false);assert.equal(obs.paused,true);
-  assert.equal(obs.tilt,0);assert.equal(obs.presetCustomized,false);assert.ok(obs.computationalRadius>=128);assert.equal(obs.initialObserverDistance,obs.computationalRadius*4);
+  assert.equal(obs.tilt,8);assert.equal(obs.presetCustomized,false);assert.ok(obs.computationalRadius>=128);assert.equal(obs.initialObserverDistance,obs.computationalRadius*4);
   assert.equal(await page.locator('#controls button').first().isVisible(),false);
   await page.locator('.control-toggle').click();assert.equal(await page.locator('#scene-choice').isVisible(),true);
+  // Visibility must follow the native hidden attribute, not just its DOM value.
+  assert.equal(await page.locator('#solver-readout').isVisible(),false);
+  assert.equal(await page.locator('#solver-readout').evaluate(e=>e.getBoundingClientRect().height),0);
   assert.equal(await page.locator('#physics-group').getAttribute('open'),'');assert.equal(await page.locator('#imaging-group').getAttribute('open'),null);assert.equal(await page.locator('#camera-group').getAttribute('open'),null);assert.equal(await page.locator('#model-group').getAttribute('open'),null);
   // Toggling an inner disclosure must never close the outer panel or change
   // the observation expansion state exposed through WebMCP.
@@ -77,7 +103,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   await configure({band:'bolometric'});assert.equal((await observe()).presetCustomized,true);await configure({band:'visible'});assert.equal((await observe()).presetCustomized,false);
   await configure({scene:'charged',model:'schwarzschild',zoom:3,tilt:-18});await page.screenshot({path:path.join(output,'custom-preset-desktop.png')});obs=await observe();assert.equal(obs.scene,'charged');assert.equal(obs.presetCustomized,true);assert.equal(obs.spin,0);assert.equal(obs.charge,0);
   await page.locator('#restore-preset').click();obs=await observe();assert.equal(obs.scene,'charged');assert.equal(obs.model,'kerr-newman');assert.equal(obs.spin,.55);assert.equal(obs.charge,.6);assert.equal(obs.tilt,18);assert.equal(obs.zoom,1);assert.equal(obs.paused,true);assert.equal(obs.falling,false);assert.equal(obs.presetCustomized,false);
-  await configure({scene:'quasar',display:'intensity',exposure:1});assert.equal((await observe()).tilt,0);
+  await configure({scene:'quasar',display:'intensity',exposure:1});assert.equal((await observe()).tilt,8);
   await openGroup('imaging-group');
   // Wait for the configured frame itself before comparing cache counters; the
   // preceding preset may also have advertised refined quality.
@@ -89,9 +115,9 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   const exposureAfter=(await observe()).render;for(const key of ['geodesicBuilds','modelBuilds','profileBuilds','observerBuilds','spectrumBuilds'])assert.equal(exposureAfter[key],exposureBefore[key],key+' changed on exposure');
   report.exposure={before:exposureBefore.geodesicBuilds,after:exposureAfter.geodesicBuilds,source:exposureAfter.timingSource};
   await configure({spin:.7,paused:false});await page.locator('#restore-preset').click();assert.equal((await observe()).paused,false);await configure({paused:true});
-  await page.locator('#reset').click();obs=await observe();assert.equal(obs.tilt,0);assert.equal(obs.presetCustomized,false);assert.equal(obs.paused,true);
+  await page.locator('#reset').click();obs=await observe();assert.equal(obs.tilt,8);assert.equal(obs.presetCustomized,false);assert.equal(obs.paused,true);
   await page.locator('.control-toggle').click();await page.screenshot({path:path.join(output,'thermal-default-0.png')});await page.locator('.control-toggle').click();
-  report.ui.push({name:'ten native presets; modify, revert, restore; effective parameters; preserved playback; startup/reset at 0°',computationalRadius:obs.computationalRadius,initialObserverDistance:obs.initialObserverDistance});
+  report.ui.push({name:'ten native presets; modify, revert, restore; effective parameters; preserved playback; startup/reset at 8°',computationalRadius:obs.computationalRadius,initialObserverDistance:obs.initialObserverDistance});
   await page.locator('#scene-choice').focus();await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');
   await page.locator('#scene-choice').selectOption('stellar');await page.waitForTimeout(300);obs=await observe();assert.equal(obs.mass,10);assert.equal(obs.band,'xray');
   await page.keyboard.press('Escape');assert.equal((await observe()).controlsExpanded,false);assert.equal(await page.locator('.control-toggle').evaluate(e=>document.activeElement===e),true);
@@ -102,6 +128,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   await page.waitForFunction(()=>{const r=observationTools.get_observation.execute({}).render;return r.diagnosticCurrent&&!r.diagnosticPending;});obs=await observe();assert.equal(obs.spin,.9375);assert.equal(obs.render.unfinishedRays,0);assert.equal(obs.render.invalidRays,0,JSON.stringify(obs));
   await page.screenshot({path:path.join(output,'m87-polarization.png')});
   await page.locator('.control-toggle').click();assert.equal(await page.locator('#spin').isDisabled(),true);assert.equal(await page.locator('#band option[value="visible"]').isDisabled(),true);
+  assert.equal(await page.locator('#solver-readout').isVisible(),true);
   for(const model of ['schwarzschild','reissner','kerr-newman'])assert.equal(await page.locator(`[data-model="${model}"]`).isDisabled(),true);
   assert.match(await page.locator('#physics-help').textContent(),/模拟数据固定为克尔时空，a=0.9375、Q=0/);
   // Include unrelated valid fields in each rejected patch to prove there are
@@ -113,6 +140,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   await page.keyboard.press('Escape');report.ui.push({name:'recorded metric, band guard, genuine Stokes display',samples:obs.samples});
   for(const scene of ['sgrA','jet']){await configure({scene});await page.locator('.control-toggle').click();assert.equal(await page.locator('[data-model="schwarzschild"]').isDisabled(),true);assert.equal((await observe()).presetCustomized,false);await page.keyboard.press('Escape');}
   await configure({scene:'charged',density:32000});await page.waitForTimeout(250);obs=await observe();assert.equal(obs.model,'kerr-newman');assert.ok(obs.charge>0);assert.ok(obs.isco>1+Math.sqrt(1-obs.spin**2-obs.charge**2));
+  assert.equal(await page.locator('#solver-readout').evaluate(e=>getComputedStyle(e).display),'none');
   await configure({scene:'isolated',observer:'infall',zoom:12,density:16000});await page.waitForFunction(()=>observationTools.get_observation.execute({}).flight.stage==='inside');
   await page.waitForTimeout(300);obs=await observe();assert.equal(obs.flight.fade,0);assert.equal(obs.render.unfinishedRays,0);assert.equal(obs.render.invalidRays,0,JSON.stringify(obs));
   await page.screenshot({path:path.join(output,'infall-interior.png')});report.ui.push({name:'interior timelike observer without cinematic fade',radius:obs.flight.r});
@@ -134,7 +162,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
 
   const fallback=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});await fallback.addInitScript(()=>{const original=HTMLCanvasElement.prototype.getContext;HTMLCanvasElement.prototype.getContext=function(kind,...args){return kind==='webgl2'?null:original.call(this,kind,...args);};});
   await fallback.goto(base+'/dist/');await fallback.waitForTimeout(350);assert.equal(await fallback.locator('#scene-choice').isDisabled(),true);assert.equal(await fallback.locator('#fall').isDisabled(),true);assert.match(await fallback.locator('#render-state').textContent(),/兼容/);
-  await fallback.locator('.control-toggle').click();assert.equal(await fallback.locator('#tilt-value').textContent(),'0°');await fallback.locator('#reset').click();assert.equal(await fallback.locator('#tilt-value').textContent(),'0°');await fallback.keyboard.press('Escape');assert.equal(await fallback.locator('.control-shell').getAttribute('open'),null);
+  await fallback.locator('.control-toggle').click();assert.equal(await fallback.locator('#tilt-value').textContent(),'8°');await fallback.locator('#reset').click();assert.equal(await fallback.locator('#tilt-value').textContent(),'8°');await fallback.keyboard.press('Escape');assert.equal(await fallback.locator('.control-shell').getAttribute('open'),null);
   await fallback.screenshot({path:path.join(output,'canvas-fallback.png')});report.ui.push({name:'forced Canvas fallback, honest limits and reset'});await fallback.close();
   assert.deepEqual(report.errors,[]);
   fs.writeFileSync(path.join(output,'report.json'),JSON.stringify(report,null,2)+'\n');

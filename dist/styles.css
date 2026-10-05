@@ -131,6 +131,10 @@ h2 { font-size: 16px; font-weight: 600; line-height: 1.4; }
 .scene-tools svg { width: 15px; height: 15px; }
 .panel-footer { align-items: baseline; margin-top: 9px; color: var(--muted); font-size: 12px; }
 #particle-count { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+/* Preserve native hidden semantics outside hot-flow scenes, including after a scene switch. */
+.solver-readout:not([hidden]) { display: grid; gap: 3px; margin-top: 7px; color: var(--muted); font: 11px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }
+.solver-readout > span { display: flex; justify-content: space-between; gap: 10px; overflow-wrap: anywhere; }
+.solver-readout output { color: var(--text); }
 .status { min-height: 0; color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 6px; overflow-wrap: anywhere; }
 .status:empty { display: none; }
 .noscript { position: absolute; bottom: 30px; width: 100%; color: var(--muted); text-align: center; }

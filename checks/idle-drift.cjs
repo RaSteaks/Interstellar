@@ -123,9 +123,9 @@ panel.shell.open=false;panel.shell.fire('toggle');panel.advance(5);near(panel.st
 panel.advance(5);assert.ok(panel.state().drift>panelAngle);
 
 // Exercise the same state owner used by native controls and the configuration
-// interface: preset provenance follows effective physics, not lens/display edits.
+// interface: startup/reset restore 8°; preset provenance follows effective physics, not lens/display edits.
 const presets=fixture();
-assert.equal(presets.observe().tilt,0);assert.equal(presets.observe().presetCustomized,false);
+assert.equal(presets.observe().tilt,8);assert.equal(presets.observe().presetCustomized,false);
 assert.equal(fs.readFileSync(path.join(dist,'index.html'),'utf8').match(/<select id="scene-choice"[^>]*>(.*?)<\/select>/s)[1].match(/<option/g).length,10);
 presets.configure({scene:'isolated',spin:.8,charge:.4});assert.equal(presets.observe().presetCustomized,false); // the metric suppresses both dormant values
 presets.configure({scene:'charged'});assert.equal(presets.observe().presetCustomized,false);
@@ -141,12 +141,12 @@ presets.configure({spin:.8,falling:true,paused:false});presets.advance(.2);
 assert.equal(presets.observe().presetCustomized,true);assert.equal(presets.observe().falling,true);
 presets.configure({paused:true});const beforeRestore={...presets.state()};
 presets.node('restore-preset').fire('click');
-assert.equal(presets.observe().presetCustomized,false);assert.equal(presets.observe().spin,.65);assert.equal(presets.observe().tilt,0);
+assert.equal(presets.observe().presetCustomized,false);assert.equal(presets.observe().spin,.65);assert.equal(presets.observe().tilt,8);
 assert.equal(presets.state().time,0);assert.equal(presets.state().flightRadius,null);assert.equal(presets.state().flightLens,null);assert.equal(presets.observe().falling,false);
 assert.equal(presets.observe().paused,beforeRestore.paused);assert.equal(presets.observe().exposure,beforeRestore.exposure);
 assert.equal(presets.state().observer,'infall');assert.equal(presets.state().drift,0);
-presets.configure({spin:.8,tilt:18});presets.configure({scene:'quasar'});assert.equal(presets.observe().presetCustomized,false);assert.equal(presets.observe().tilt,0);
-presets.configure({scene:'stellar'});presets.node('reset').fire('click');assert.equal(presets.observe().scene,'quasar');assert.equal(presets.observe().tilt,0);assert.equal(presets.observe().paused,true);
+presets.configure({spin:.8,tilt:18});presets.configure({scene:'quasar'});assert.equal(presets.observe().presetCustomized,false);assert.equal(presets.observe().tilt,8);
+presets.configure({scene:'stellar'});presets.node('reset').fire('click');assert.equal(presets.observe().scene,'quasar');assert.equal(presets.observe().tilt,8);assert.equal(presets.observe().paused,true);
 
 // GRMHD locks the recorded metric at the interface boundary, including dormant
 // charge values, and rejection leaves every state field intact.

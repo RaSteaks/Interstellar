@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "repository": "https://github.com/AFD-Illinois/iharm2d_v3.git",
   "commit": "bfa06d2cbabf2c8cd94c1711d04fd468397e9aee",
   "spin": 0.9375,
@@ -82,6 +82,17 @@
   "maxMagneticOrthogonalityError": 1.5543122344752192e-15,
   "sha256": "9dfa579351392521d326db0cf8200a7f9b81d233ac492b29268a715b76bdfd9f",
   "bytes": 8060928,
+  "checkpoint": {
+    "path": "grmhd-torus.checkpoint.bin.gz",
+    "format": "GRMHDCP1",
+    "time": 800.0,
+    "precision": "float64",
+    "bytes": 405544,
+    "sha256": "c903690b67e6349146aa24ed8858607d6c5e30901b481b8d2a725ff083da9bd6",
+    "stateCount": 49152,
+    "boundaryRows": 2,
+    "boundaryWidth": 64
+  },
   "reconstruction": "WENO5",
   "magneticDivergenceControl": "flux constrained transport",
   "cooling": false,

@@ -44,6 +44,13 @@ Current volume / polarised renderer (2026-10-05):
   fluid records and provenance are distributed; upstream C source/executables
   are not included. Parameters, checksum and measured errors are in
   data/grmhd-torus.json; the reproducible recipe is tools/generate-grmhd.py.
+- The browser continuation ABI is an independent Rust implementation in
+  tools/grmhd-runtime.rs, compiled from the same source for native and
+  wasm32. It restores the published GRMHDCP1 float64 checkpoint and provides
+  the conservative scalar finite-volume continuation described in PHYSICS.md;
+  it is not a redistribution of iharm2d_v3 and is not claimed to be a
+  complete upstream GRMHD restart. Build commands, compiler version and hashes
+  are recorded in solver/grmhd-runtime.json.
 - Dexter (2016), equations 93-101, 136 and 145-147: thermal synchrotron,
   absorption and Faraday coefficients. Independently implemented formulae,
   not the complete grtrans solver or atmosphere.

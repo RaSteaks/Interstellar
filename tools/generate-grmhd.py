@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import struct
 import subprocess
 import tempfile
 
@@ -22,6 +23,25 @@ ROOT = Path(__file__).resolve().parents[1]
 # Readers invert the same map (dist/plasma.js velocityTexture, the shader's theta
 # table), so the slope recorded in the metadata must stay equal to this constant.
 THETA_SLOPE = 0.7
+CHECKPOINT_MAGIC = b"GRMHDCP1"
+CHECKPOINT_HEADER = "<8sIIII d II"
+CELLS = 64 * 64
+COMPONENTS = 12
+
+
+def checkpoint_bytes(last_frame, time):
+    """Serialize a complete double-precision restart state and both edges.
+
+    The renderer history remains float32 for compact GPU upload.  Restarting
+    the solver needs every primitive at t=800 plus explicit radial boundary
+    rows, so the checkpoint is a separate lossless float64 resource.
+    """
+    boundary = []
+    for radial in (0, 63):
+        start = radial * 64 * COMPONENTS
+        boundary.extend(last_frame[start:start + 64 * COMPONENTS])
+    header = struct.pack(CHECKPOINT_HEADER, CHECKPOINT_MAGIC, 1, CELLS, COMPONENTS, 2, time, 64, 0)
+    return header + struct.pack("<" + "d" * len(last_frame), *last_frame) + struct.pack("<" + "d" * len(boundary), *boundary)
 
 
 def run_solver(destination):
@@ -50,6 +70,7 @@ def pack(problem):
     accretion = []
     output = array.array("f")
     header = None
+    last_frame = None
     # Keep the full causal history, including startup, so lookback does not
     # wrap from the end of the movie into its beginning.
     for file in sorted((problem / "dumps").glob("dump[0-9][0-9][0-9]")):
@@ -62,6 +83,7 @@ def pack(problem):
                 continue
             header = h
             rows = [[float(x) for x in line.split()] for line in handle]
+        frame_records = []
         if len(rows) != 64 * 64:
             raise ValueError(f"Unexpected grid size: {file}")
         mdot = 0.0
@@ -80,9 +102,12 @@ def pack(problem):
                 mdot -= 2 * math.pi / 64 * rho * u[1] * row[31]
             # Modified KS -> spherical KS. Preserve the evolved four-velocity
             # and comoving magnetic four-vector, not the primitive 3-velocity.
-            output.extend([math.log(rho), math.log(internal), max(0, bsq), 0,
-                           u[0], r * u[1], stretch * u[2], u[3],
-                           b[0], r * b[1], stretch * b[2], b[3]])
+            record = [math.log(rho), math.log(internal), max(0, bsq), 0,
+                      u[0], r * u[1], stretch * u[2], u[3],
+                      b[0], r * b[1], stretch * b[2], b[3]]
+            output.extend(record)
+            frame_records.extend(record)
+        last_frame = frame_records
         frames.append(h[0])
         if h[0] >= 400:
             accretion.append(mdot)
@@ -95,7 +120,15 @@ def pack(problem):
     folder = ROOT / "dist" / "data"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "grmhd-torus.f32.gz").write_bytes(gzip.compress(binary, compresslevel=9, mtime=0))
-    meta = dict(version=1,repository=REPOSITORY,commit=COMMIT,spin=.9375,charge=0,
+    if last_frame is None or len(last_frame) != CELLS * COMPONENTS:
+        # The sorted dump list above is intentionally conservative; the final
+        # accepted frame is always the last frame collected, even if a source
+        # directory contains unrelated files.
+        last_frame = list(output[-CELLS * COMPONENTS:])
+    checkpoint = checkpoint_bytes(last_frame, frames[-1])
+    checkpoint_path = folder / "grmhd-torus.checkpoint.bin.gz"
+    checkpoint_path.write_bytes(gzip.compress(checkpoint, compresslevel=9, mtime=0))
+    meta = dict(version=2,repository=REPOSITORY,commit=COMMIT,spin=.9375,charge=0,
                 resolution=[64,64],axisymmetric=True,adiabaticIndex=5/3,
                 timeUnit="GM/c^3",timeRange=[frames[0],frames[-1]],times=frames,
                 coordinates="spherical ingoing Kerr-Schild",radialStart=header[3],radialStep=header[5],thetaSlope=THETA_SLOPE,
@@ -103,6 +136,9 @@ def pack(problem):
                 accretionRateCode=sum(accretion)/len(accretion),maxDivB=max_divergence,
                 maxVelocityNormError=max_velocity_error,maxMagneticOrthogonalityError=max_magnetic_error,
                 sha256=hashlib.sha256(binary).hexdigest(),bytes=len(binary),
+                checkpoint=dict(path=checkpoint_path.name,format="GRMHDCP1",time=frames[-1],precision="float64",
+                                bytes=len(checkpoint),sha256=hashlib.sha256(checkpoint).hexdigest(),stateCount=CELLS * COMPONENTS,
+                                boundaryRows=2,boundaryWidth=64),
                 reconstruction="WENO5",magneticDivergenceControl="flux constrained transport",cooling=False,windSource=True,
                 limitations="2D axisymmetric, 64x64, finite movie; no sustained 3D dynamo, no radiation feedback")
     (folder / "grmhd-torus.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n")

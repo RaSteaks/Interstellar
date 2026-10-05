@@ -16,8 +16,8 @@
   }
   // These are illustrative physical configurations, not fits to measured spins.
   const scenes=Object.freeze({
-    // Re-selecting the initial scene restores the same 0° disk elevation as startup.
-    quasar:{name:"类星体 · 光学热盘",mass:5e8,mdot:.015,spin:.65,charge:0,model:"kerr",band:"visible",flow:"thermal",tilt:0},
+    // Re-selecting the initial scene restores the same 8° disk elevation as startup.
+    quasar:{name:"类星体 · 光学热盘",mass:5e8,mdot:.015,spin:.65,charge:0,model:"kerr",band:"visible",flow:"thermal",tilt:8},
     stellar:{name:"恒星级 · X 射线热盘",mass:10,mdot:.12,spin:.8,charge:0,model:"kerr",band:"xray",flow:"thermal",tilt:18},
     m87:{name:"M87* · 射电热流与喷流",mass:6.5e9,mdot:2e-5,spin:.9375,charge:0,model:"kerr",band:"radio",flow:"grmhd",tilt:73,observer:"static",electronRatio:40,displayGain:8},
     sgrA:{name:"银河系中心 · 射电热流",mass:4.3e6,mdot:1e-8,spin:.9375,charge:0,model:"kerr",band:"radio",flow:"grmhd",tilt:35,observer:"static",electronRatio:10,displayGain:200},

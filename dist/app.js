@@ -12,10 +12,10 @@
   const navigation = globalThis.BlackHoleNavigation;
   const flightStatus = document.querySelector("#flight-status");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  // Startup and reset use an equatorial view (0°); named view presets stay independent.
+  // Startup and reset use an 8° disk elevation; named view presets stay independent.
   // Sampling changes resolution, never gas mass or optical depth.
-  const defaults={scene:"quasar",model:"kerr",spin:.65,charge:0,band:"visible",display:"intensity",observer:"infall",exposure:1,tilt:0,speed:1,density:128000,zoom:1,yaw:0,falling:false};
-  const state={...defaults,paused:reducedMotion.matches,time:0,viewZoom:defaults.zoom,reducedMotion:reducedMotion.matches,drift:0,flightRadius:null,flightLens:null};
+  const defaults={scene:"quasar",model:"kerr",spin:.65,charge:0,band:"visible",display:"intensity",observer:"infall",exposure:1,tilt:8,speed:1,density:128000,zoom:1,yaw:0,falling:false};
+  const state={...defaults,paused:reducedMotion.matches,time:0,viewZoom:defaults.zoom,reducedMotion:reducedMotion.matches,drift:0,flightRadius:null,flightLens:null,waitingForData:false};
   const fields=Object.fromEntries(["spin","charge","tilt","speed","density","zoom","exposure"].map(key=>[key,document.getElementById(key)]));
   // The scene selector has its own ID; #scene is the existing canvas container.
   const choices=Object.fromEntries(["scene","band","display","observer"].map(key=>[key,document.getElementById(key==="scene"?"scene-choice":key)]));
@@ -165,13 +165,27 @@
     frame=0;
     // Hidden-page suspension and bounded elapsed time avoid jumps after returning to the page.
     const elapsed=Math.max(0,Math.min((now-lastTime)/1000,.05));
-    const movie=astrophysics.scenes[state.scene].flow==="grmhd",ready=!movie||renderer.metrics?.dataStatus==="ready";
+    const movie=astrophysics.scenes[state.scene].flow==="grmhd",ready=!movie||renderer.metrics?.dataStatus==="ready",availableTime=renderer.metrics?.latestSimulationTime??renderer.metrics?.historyEndTime??800,continuationStatus=renderer.metrics?.continuationStatus,terminalFallback=movie&&(continuationStatus==="unavailable"||continuationStatus==="failed");
+    let flight=renderer.physical?astrophysics.camera(state,astrophysics.model(state)):navigation.view(state.viewZoom,state.reducedMotion);
     if(!state.paused&&!document.hidden&&ready){
       if(state.falling){
-        const m=astrophysics.model(state);state.flightRadius=astrophysics.advanceFall(state.flightRadius,m,state.tilt,elapsed*state.speed*8);
-        state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);
-        if(state.flightRadius<=astrophysics.minimumRadius(m,"infall")+1e-9){state.falling=false;state.paused=true;updateUI("旅程已跨越外视界；暂停在当前观察位置，Esc 返回。");}
-      } else state.time+=elapsed*state.speed;
+        const m=astrophysics.model(state),candidateRadius=astrophysics.advanceFall(state.flightRadius,m,state.tilt,elapsed*state.speed*8),candidateCamera=astrophysics.camera({...state,flightRadius:candidateRadius},m),candidateTime=350+state.time*8+candidateCamera.coordinateTime;
+        if(movie&&candidateTime>availableTime+1e-6){
+          const budget=Math.max(0,availableTime-350-state.time*8);let lo=astrophysics.minimumRadius(m,"infall"),hi=m.initialObserverDistance;
+          for(let i=0;i<28;i++){const radius=(lo+hi)/2,camera=astrophysics.camera({...state,flightRadius:radius},m);if(camera.coordinateTime>budget)lo=radius;else hi=radius;}
+          state.flightRadius=(lo+hi)/2;state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);state.waitingForData=!terminalFallback;
+          // A failed continuation has no future snapshot to wait for. Stop the
+          // journey at the last valid event instead of pinning free fall forever.
+          if(terminalFallback){state.falling=false;state.paused=true;updateUI(continuationStatus==="unavailable"?"持续求解不可用，已暂停在有限片段末时刻。":"持续求解已停止，已暂停在最后有效画面。");}
+        } else {
+          state.flightRadius=candidateRadius;state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);state.waitingForData=false;
+          if(state.flightRadius<=astrophysics.minimumRadius(m,"infall")+1e-9){state.falling=false;state.paused=true;updateUI("旅程已跨越外视界；暂停在当前观察位置，Esc 返回。");}
+        }
+      } else {
+        const nextTime=state.time+elapsed*state.speed,candidateTime=350+nextTime*8+flight.coordinateTime;
+        if(movie&&candidateTime>availableTime+1e-6){state.time=Math.max(state.time,(availableTime-350-flight.coordinateTime)/8);state.waitingForData=!terminalFallback;if(terminalFallback){state.falling=false;state.paused=true;updateUI(continuationStatus==="unavailable"?"持续求解不可用，已暂停在有限片段末时刻。":"持续求解已停止，已暂停在最后有效画面。");}}
+        else {state.time=nextTime;state.waitingForData=false;}
+      }
     }
     const movingBefore=state.viewZoom!==state.zoom;
     state.viewZoom=navigation.smoothZoom(state.viewZoom,state.zoom,elapsed,state.reducedMotion);
@@ -181,16 +195,7 @@
     // Finishing a drag, journey or eased zoom must refine even if the final
     // camera values are unchanged from the last coarse frame.
     if((movingBefore&&!moving)||(wasInteracting&&!state.interacting))renderer.refine?.();
-    let flight=renderer.physical?astrophysics.camera(state,astrophysics.model(state)):navigation.view(state.viewZoom,state.reducedMotion);
-    if(movie&&350+state.time*8+flight.coordinateTime>770){
-      // Keep a genuine worldline event within the finite movie window. During
-      // automatic travel stop at the last available event; manual inspection
-      // may select the last available frame for its chosen observation point.
-      const m=astrophysics.model(state),available=Math.max(0,770-350-state.time*8);
-      if(state.falling){let lo=astrophysics.minimumRadius(m,"infall"),hi=m.initialObserverDistance;for(let i=0;i<28;i++){const r=(lo+hi)/2,c=astrophysics.camera({...state,flightRadius:r},m);if(c.coordinateTime>available)lo=r;else hi=r;}state.flightRadius=(lo+hi)/2;state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);}
-      else state.time=Math.max(0,(770-350-flight.coordinateTime)/8);
-      state.falling=false;state.paused=true;flight=astrophysics.camera(state,m);updateUI("已到该观察位置的片段末时刻，画面暂停。");
-    }
+    flight=renderer.physical?astrophysics.camera(state,astrophysics.model(state)):navigation.view(state.viewZoom,state.reducedMotion);
     // Idle drift runs only for the full-view framing: the zoom journey owns the orbit
     // beyond 1.4x, the open panel keeps the stage, and a recent interaction holds it off.
     // Reduced motion freezes the camera immediately, even when disk playback is enabled.
@@ -207,10 +212,18 @@
     }
     lastTime=now;renderer.draw(elapsed);
     updateTimingReadout();
-    if(movie&&renderer.metrics?.dataStatus!=="ready"){flightStatus.hidden=false;flightStatus.textContent=renderer.metrics?.dataStatus==="error"?"热流片段未能载入 · 展开控制选择热盘或刷新重试":"正在载入热流模拟片段…";}
+    if(movie&&renderer.metrics?.dataStatus!=="ready"){flightStatus.hidden=false;flightStatus.textContent=renderer.metrics?.dataStatus==="error"?"热流历史未能载入 · 展开控制选择热盘或刷新重试":"正在载入热流历史…";}
+    else if(movie&&renderer.metrics?.continuationStatus==="unavailable"){flightStatus.hidden=false;flightStatus.textContent="持续求解不可用 · 已回退到有限片段播放";}
+    else if(movie&&renderer.metrics?.continuationStatus==="failed"){flightStatus.hidden=false;flightStatus.textContent="持续求解已停止 · 保留最后有效画面";}
+    else if(movie&&state.waitingForData){flightStatus.hidden=false;flightStatus.textContent=`等待热流数据 · 最新完整状态 t=${(renderer.metrics?.latestSimulationTime??availableTime).toFixed(0)}`;}
     else flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
     document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}`;
-    if(renderer.metrics?.movieEnded&&!state.paused){state.paused=true;state.falling=false;updateUI("热流模拟片段播放结束；重置或重新选择场景可重播。");}
+    updateSolverReadout(movie,renderer.metrics);
+    if(movie&&renderer.metrics?.movieEnded&&!state.paused){
+      // Keep the terminal fallback finite: no future continuation means no
+      // reason to schedule another animation frame at the same observation.
+      state.paused=true;state.falling=false;state.waitingForData=false;updateUI(continuationStatus==="unavailable"?"持续求解不可用，已暂停在有限片段末时刻。":"持续求解已停止，已暂停在最后有效画面。");
+    }
     // Interior observers still receive light. No cinematic opacity parks them.
     if((moving||!state.paused)&&!document.hidden&&!contextLost&&!frame)frame=requestAnimationFrame(animate);
   }
@@ -242,9 +255,23 @@
     const label={"gpu-query":"GPU 查询","gpu-query-pending":"等待 GPU 查询","cpu-submission":"CPU 提交耗时（GPU 计时不可用）",mixed:"混合（GPU 查询与 CPU 提交）"}[source]||"等待首帧计时";
     document.querySelector("#timing-source").textContent=renderer.physical?`计时来源：${label}`:"计时来源：Canvas 投影";
   }
+  function updateSolverReadout(recorded,metrics={}) {
+    const readout=document.querySelector("#solver-readout");readout.hidden=!recorded;if(!recorded)return;
+    const stateLabel={loading:"初始化",ready:"持续求解",computing:"计算中",backpressure:"等待缓存消费",paused:"求解暂停",unavailable:"有限片段回退",failed:"求解失败"}[metrics.continuationStatus]||"持续求解准备中";
+    document.querySelector("#solver-status").textContent=stateLabel;
+    document.querySelector("#solver-latest").textContent=`最新 t=${(metrics.latestSimulationTime??metrics.historyEndTime??800).toFixed(0)}`;
+    document.querySelector("#solver-observation").textContent=`观测 t=${(metrics.observationTime??metrics.simulationTime??350).toFixed(0)}`;
+    document.querySelector("#solver-rate").textContent=`${(metrics.solverStepRate??0).toFixed(1)} GM/c³/s`;
+    document.querySelector("#solver-history").textContent=metrics.historyMissing?"光路历史缺失 · 仅使用缓存窗口":"历史完整";
+    if(metrics.continuationStatus==="unavailable")document.querySelector("#solver-history").textContent="有限片段回退 · 不宣称持续求解";
+    const diagnostics=metrics.solverDiagnostics;
+    document.querySelector("#solver-diagnostics").textContent=diagnostics?.length>=8?`质量 ${(diagnostics[4]*100).toFixed(3)}% · 内能 ${(diagnostics[5]*100).toFixed(3)}% · 坐标 divB~${diagnostics[6].toExponential(1)} · u漂移 ${diagnostics[7].toExponential(1)}`:"守恒与约束诊断等待中";
+    const renderState=document.querySelector("#render-state");
+    renderState.textContent=state.paused?"画面已暂停":state.waitingForData?"等待热流数据":metrics.continuationStatus==="computing"?"持续求解中":"相对论辐射成像";
+  }
   function snapshot() {
     const model=renderer.physical?astrophysics.model(state):physics.model(state);
-    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,falling:state.falling,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
+    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,falling:state.falling,waitingForData:state.waitingForData,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,latestSimulationTime:renderer.metrics?.latestSimulationTime??null,observationTime:renderer.metrics?.observationTime??null,solverStepRate:renderer.metrics?.solverStepRate??0,solverDiagnostics:renderer.metrics?.solverDiagnostics??null,historyMissing:Boolean(renderer.metrics?.historyMissing),timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
   }
   function updateUI(message) {
     const model=renderer.physical?astrophysics.model(state):physics.model(state);
@@ -295,7 +322,7 @@
     document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}`;
     document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容示意":state.paused?"画面已暂停":"相对论辐射成像";
     const fallButton=document.querySelector("#fall");fallButton.disabled=!renderer.physical||state.reducedMotion;fallButton.setAttribute("aria-pressed",String(state.falling));fallButton.textContent=state.falling?"停止自由落体旅程":"开始自由落体旅程";
-    if(message)status.textContent=message;
+    updateSolverReadout(recorded,renderer.metrics);if(message)status.textContent=message;
   }
   // Selection and restoration use exactly the same initial physics/camera
   // patch; only an explicit configure call can override those preset values.
@@ -341,7 +368,7 @@
     if(cameraChange){state.falling=false;state.flightRadius=null;state.flightLens=null;}
     const becamePaused=!state.paused&&next.paused;
     Object.assign(state,patch);
-    if(presetApplied){state.viewZoom=state.zoom;driftAngle=state.drift=0;driftRate=0;markDriftInteraction();}
+    if(presetApplied){state.viewZoom=state.zoom;state.waitingForData=false;driftAngle=state.drift=0;driftRate=0;markDriftInteraction();renderer.resetSimulation?.();}
     // Resuming keeps the lens that fixed the journey's field of view; animate has
     // replaced viewZoom with the journey's own zoom, so re-deriving the lens from
     // it would change the framing mid-fall.
@@ -400,7 +427,7 @@
     } catch {status.textContent="未能进入全屏，请允许全屏后重试。";}
   });
   document.addEventListener("fullscreenchange",()=>{document.querySelector("#fullscreen-label").textContent=document.fullscreenElement?"退出全屏":"全屏";fullButton.setAttribute("aria-pressed",String(Boolean(document.fullscreenElement)));resize();});
-  document.addEventListener("visibilitychange",()=>{if(document.hidden){if(frame)cancelAnimationFrame(frame);frame=0;}else requestRender();});
+  document.addEventListener("visibilitychange",()=>{if(document.hidden){renderer.setSolverActive?.(false);if(frame)cancelAnimationFrame(frame);frame=0;}else requestRender();});
   reducedMotion.addEventListener("change",event=>{state.reducedMotion=event.matches;if(event.matches)applySettings({paused:true,falling:false},"已按减少动态效果偏好暂停；可播放物质演化，镜头保持静止。");else {updateUI();requestRender();}});
 
   const surface=activeCanvas();

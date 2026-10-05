@@ -1,0 +1,57 @@
+{
+  "formatVersion": 1,
+  "api": [
+    "grmhd_init",
+    "grmhd_advance",
+    "grmhd_snapshot",
+    "grmhd_destroy"
+  ],
+  "source": "tools/grmhd-runtime.rs",
+  "sourceSha256": "bcc508648fe681d3090f2db3dbe73b55238a0b77ad923c143a388a4d1f13d513",
+  "upstreamRepository": "https://github.com/AFD-Illinois/iharm2d_v3.git",
+  "upstreamCommit": "bfa06d2cbabf2c8cd94c1711d04fd468397e9aee",
+  "historySha256": "9dfa579351392521d326db0cf8200a7f9b81d233ac492b29268a715b76bdfd9f",
+  "checkpointSha256": "c903690b67e6349146aa24ed8858607d6c5e30901b481b8d2a725ff083da9bd6",
+  "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+  "wasmSha256": "595230cc66ebc5e6c320a1375c171bc464a3f8b463db1c4ac42196910b0371a0",
+  "wasmBytes": 1731097,
+  "doublePrecision": true,
+  "sharedMemory": false,
+  "nativeCommand": [
+    "rustc",
+    "-O",
+    "-C",
+    "panic=abort",
+    "-o",
+    "<temporary>/grmhd-runtime-native",
+    "tools/grmhd-runtime.rs"
+  ],
+  "wasmCommand": [
+    "rustc",
+    "--target=wasm32-unknown-unknown",
+    "-O",
+    "--crate-type=cdylib",
+    "-C",
+    "panic=abort",
+    "-o",
+    "dist/solver/grmhd-runtime.wasm",
+    "tools/grmhd-runtime.rs"
+  ],
+  "stepMax": 2.0,
+  "snapshotInterval": 20.0,
+  "cacheSlots": 128,
+  "diagnostics": [
+    "time",
+    "finite",
+    "minDensity",
+    "minInternal",
+    "massResidual",
+    "internalResidual",
+    "maxCoordinateDivB",
+    "velocityNormDrift",
+    "velocityDrift",
+    "acceptedSteps",
+    "positive",
+    "maxVelocityNormError"
+  ]
+}

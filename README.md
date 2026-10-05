@@ -9,6 +9,7 @@
 - **类时观察者**：E=1、L=0 的自由落体世界线，按固有时间推进，含运动像差与频移；也可选视界外静止观察者。
 - **十个场景**：从光学热盘到射电热流、喷流、逆行盘、带电黑洞与规定轨道热点。
 - **本地生成的 GRMHD 片段**：由固定提交的 Illinois iharm2d_v3 产出，站点只分发数值记录与来源。
+- **热流持续求解首轮实现**：t=800 完整检查点、单 Worker 双精度 Wasm、20 GM/c³ 快照和 128 槽动态历史；求解不足时冻结在最后完整事件并显示等待。
 - **可访问性与偏好**：默认收起的原生 details 面板、原生 select/range、完整键盘路径、Esc 收起并归还焦点，跟随「减少动态效果」。
 
 ## 场景预设
@@ -34,6 +35,8 @@
 | `dist/astrophysics.js` | 物理质量／吸积率、广义薄盘通量、混合气体／辐射压力与熵守恒内流、Planck 与 CIE 光谱、自由落体世界线与取景 |
 | `dist/plasma.js` | 热同步辐射、吸收、法拉第旋转／转换、四分量 Stokes 矩阵指数、经 SHA-256 核验的 GRMHD 读取 |
 | `dist/physical-renderer.js` | WebGL2 有限体积光线传输求解器与显示链（唯一现代渲染路径） |
+| `dist/grmhd-worker.js` / `dist/grmhd-continuation.js` | 单 Worker 求解会话、暂停/重置/销毁、可转移快照与 128 槽缓存 |
+| `dist/solver/grmhd-runtime.wasm` / `dist/solver/grmhd-runtime.js` | 预编译双精度 continuation ABI 与 MIME 回退加载器 |
 | `dist/app.js` | 共享状态、参数校验与原子应用、页面生命周期与可见性、空闲绕转抑制、WebMCP 工具 |
 | `dist/navigation.js` | 统一 Pointer／Wheel／GestureEvent 手势、缩放边界、镜头缓动、空闲绕转步进 |
 | `dist/physics.js`、`dist/geodesics.js`、`dist/raytracer.js` | 保留的历史基准，以及 Canvas 兼容画面共享的科学核心 |
@@ -51,10 +54,18 @@ python3 -m http.server 8765 --bind 127.0.0.1
 # 打开 http://127.0.0.1:8765/dist/
 ```
 
+在生成器产出历史与 float64 检查点后，验证检查点并构建 native、Wasm 和构建元数据：
+
+```bash
+python3 tools/generate-grmhd.py --source /path/to/iharm2d_v3
+python3 tools/build-grmhd-runtime.py
+```
+
 运行环境要求：
 
 - 现代浏览器 + **WebGL2**，并支持 `EXT_color_buffer_float`。缺少时自动进入 Canvas 兼容投影，界面会明确标注：该路径不含引力透镜，也不计算视界内观察。
 - GRMHD 场景首次使用时会下载约 **6.9 MiB** 的热流片段并按元数据校验 SHA-256，需要 `DecompressionStream` 与 `SubtleCrypto`，即 **安全上下文**（`localhost` 或 https）。校验失败会在面板中报告，而不是静默降级。
+- 首次播放热流场景还会按需加载 `dist/data/grmhd-torus.checkpoint.bin.gz` 和 `.wasm`；检查点恢复失败、Worker 异常或 Wasm 加载失败会明确回退到 0–800 的有限播放，不会标称持续求解。
 
 ## 检查与验证
 
@@ -66,6 +77,8 @@ node checks/render-physics.cjs     # 历史渲染核心：盘面分布、观察�
 node checks/navigation.cjs         # 手势、去重、缩放边界、缓动、近视界标架
 node checks/idle-drift.cjs         # 空闲绕转、指针／原生手势生命周期、预设与参数原子拒绝、旅程恢复
 node checks/plunge-particles.cjs   # 坠落类时归一化、E/L 守恒、近视界频移、轨迹单调性
+node checks/continuous-solver.cjs  # t=800 恢复、native/Wasm 对照、t=1600 有限新状态
+node checks/grmhd-worker.cjs       # 逐帧目标、固定快照间隔、背压、环形缓存和重置
 ```
 
 真实 GPU 的浏览器检查需要 Playwright 驱动程序与本机 Chrome（可用 `PLAYWRIGHT_MODULE`、`CHROME_EXECUTABLE` 指向宿主已有的副本，不写入项目依赖），以及一个本地静态服务（基线端口服务 `verification/thermal/baseline` 的原始快照）：
@@ -85,14 +98,15 @@ node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 
 - 由 `tools/generate-grmhd.py` 在临时目录克隆并固定 `AFD-Illinois/iharm2d_v3` 提交 `bfa06d2cbabf2c8cd94c1711d04fd468397e9aee`，以 64×64、a=0.9375、Q=0、t=0..800 运行。
 - 站点只分发 41 帧数值记录（密度、内能、四速度、磁场）与其来源说明，**不打包上游求解器源码**；解压后约 7.7 MiB。
-- 元数据记录 `sha256`、字节数、div B 与四速度归一化误差；浏览器侧按同一哈希校验后才使用。`node checks/physical-core.cjs` 会重新校验二进制与元数据的一致性。
+- `tools/generate-grmhd.py` 从上游末帧生成 float64 `GRMHDCP1` 检查点（含完整状态和两条边界行）；`tools/build-grmhd-runtime.py` 只验证这份 canonical checkpoint，不会把 float32 展示历史重新提升为 float64，然后从同一 Rust 源码生成 native/Wasm。浏览器第二阶段 continuation 使用守恒标量有限体积推进，但尚不是完整重新编译的 iharm2d_v3 长程 GRMHD。
+- 元数据记录 `sha256`、字节数、精度、时间、形状、div B 与四速度归一化误差；浏览器侧缺少哈希或形状不匹配时 fail closed，校验后才使用。`node checks/physical-core.cjs` 会重新校验二进制与元数据的一致性。
 - 记录的极向拉伸系数 `thetaSlope` 必须与生成器写入数据时所用的一致，检查中有对应断言。
 
 ## 已知边界与简化
 
 本项目刻意不宣称超出其实现范围的能力，当前明确的保留项：
 
-- GRMHD 为 **64×64、轴对称、有限片段**，未做持续演化的三维 GRRMHD；质量与吸积率是示意配置，**不是**对 M87* 或银河系中心的观测拟合。
+- GRMHD 历史为 **64×64、轴对称、有限片段**，浏览器首轮 t>800 延拓只用于验证 Worker/Wasm/缓存架构，未宣称完整上游 GRMHD 继续运行；仍未做三维 GRRMHD，质量与吸积率也不是对 M87* 或银河系中心的观测拟合。
 - 电子温度与局部同步辐射为文献拟合处方；灰大气不含完整多次散射或返回辐射。
 - 热盘是解析稳态模型，含有限内缘应力、灰消光与注入速度等模型参数，不由 MRI 自洽导出。
 - 采样以有限光线预算推进，未收敛／无效光线作为显式状态报告，不混入阴影。
