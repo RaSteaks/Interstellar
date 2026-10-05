@@ -27,15 +27,35 @@ included in this distribution):
   065001, arXiv:1502.03808 - DNGR ray-bundle rendering of spinning black holes.
 - Gralla, Holz & Wald (2019), Phys. Rev. D 100, 024018, arXiv:1906.00873 -
   shadow, lensing ring and photon ring image decomposition.
-- Bruneton (2020), arXiv:2010.08737 - real-time shader via precomputed
+- Bruneton (2020), arXiv:2010.08735 - real-time shader via precomputed
   deflection tables; alternative performance route.
 - Luminet (1979), Astronomy & Astrophysics 75, 228 - first computed image of
   a spherical black hole with a thin accretion disk.
-- Event Horizon Telescope Collaboration (2019), ApJL 875 L1 (Paper VI) -
+- Event Horizon Telescope Collaboration (2019), ApJL 875 L6 (Paper VI) -
   observed ring asymmetry from relativistic Doppler beaming.
 - oseiskar/black-hole (GPL) and rantonels/starless (MIT) - background lensing
   and multiple star-image presentation references; physics write-up at
   https://oseiskar.github.io/black-hole/docs/physics.html
+
+Current volume / polarised renderer (2026-10-05):
+- Gammie, McKinney & Toth (2003), HARM, arXiv:astro-ph/0301509.
+- Numerical GRMHD movie generated locally by running AFD-Illinois/iharm2d_v3,
+  pinned commit bfa06d2cbabf2c8cd94c1711d04fd468397e9aee. Only numerical
+  fluid records and provenance are distributed; upstream C source/executables
+  are not included. Parameters, checksum and measured errors are in
+  data/grmhd-torus.json; the reproducible recipe is tools/generate-grmhd.py.
+- Dexter (2016), equations 93-101, 136 and 145-147: thermal synchrotron,
+  absorption and Faraday coefficients. Independently implemented formulae,
+  not the complete grtrans solver or atmosphere.
+- Wyman, Sloan & Shirley (2013), Simple Analytic Approximations to the CIE XYZ
+  Color Matching Functions, JCGT 2(2), 1-11.
+  https://jcgt.org/published/0002/02/01/
+- Bronzwaer et al. (2018), RAPTOR I, arXiv:1801.10452: time-dependent
+  radiative transfer reference. No RAPTOR source is included.
+
+The renderer has finite resolution/history and approximate atmosphere and
+thermal-emission coefficients. Its illustrative masses/accretion rates,
+electron heating prescriptions and display gains are not observational fits.
 
 A full per-effect derivation trail lives in PHYSICS.md at the repository root.
 

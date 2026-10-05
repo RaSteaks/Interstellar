@@ -5,14 +5,20 @@
   const scene = document.querySelector("#scene");
   const shell = document.querySelector("#control-shell");
   const toggle = shell.querySelector("summary");
+  const panel = document.querySelector("#controls");
   const status = document.querySelector("#status");
   const physics = globalThis.BlackHolePhysics;
+  const astrophysics = globalThis.BlackHoleAstrophysics;
   const navigation = globalThis.BlackHoleNavigation;
   const flightStatus = document.querySelector("#flight-status");
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
-  const defaults = { model: "kerr", spin: 0.65, tilt: 18, speed: 1, density: 32000, zoom: 1, yaw: 0 };
-  const state = { ...defaults, paused: reducedMotion.matches, time: 0, viewZoom: defaults.zoom, reducedMotion: reducedMotion.matches, drift: 0 };
-  const fields = Object.fromEntries(["spin", "tilt", "speed", "density", "zoom"].map(key => [key, document.getElementById(key)]));
+  // Startup and reset use an equatorial view (0°); named view presets stay independent.
+  // Sampling changes resolution, never gas mass or optical depth.
+  const defaults={scene:"quasar",model:"kerr",spin:.65,charge:0,band:"visible",display:"intensity",observer:"infall",exposure:1,tilt:0,speed:1,density:128000,zoom:1,yaw:0,falling:false};
+  const state={...defaults,paused:reducedMotion.matches,time:0,viewZoom:defaults.zoom,reducedMotion:reducedMotion.matches,drift:0,flightRadius:null,flightLens:null};
+  const fields=Object.fromEntries(["spin","charge","tilt","speed","density","zoom","exposure"].map(key=>[key,document.getElementById(key)]));
+  // The scene selector has its own ID; #scene is the existing canvas container.
+  const choices=Object.fromEntries(["scene","band","display","observer"].map(key=>[key,document.getElementById(key==="scene"?"scene-choice":key)]));
   let renderer;
   let frame = 0;
   let lastTime = 0;
@@ -22,6 +28,9 @@
   // Start at full idle speed unless the system requests no automatic camera motion.
   let driftAngle = 0, driftRate = reducedMotion.matches?0:1, driftUntil = null;
   const markDriftInteraction = () => { driftUntil = performance.now(); };
+  // Native physical/camera range drags share interaction quality with canvas
+  // gestures. Display exposure never changes the physical sampling target.
+  const rangePointers=new Set();
 
   // Fixed seeds keep density changes stable. Heights belong to the Canvas
   // fallback; the GPU particles share the ray tracer's zero-thickness disk.
@@ -60,15 +69,15 @@
     return {stars, blobs};
   })();
 
-  // Cache only ray geometry; live GPU particles produce all disk light each frame.
+  // The physical path integrates evolving fluid emission along the entire ray.
   function createWebGLRenderer() {
-    const engine=globalThis.BlackHoleRaytracer.create({canvas,particles,state,physics,onNeedsFrame:requestRender});
+    const engine=globalThis.BlackHolePhysicalRenderer.create({canvas,state,onNeedsFrame:requestRender,onStatus:message=>{status.textContent=message;}});
     return engine && {...engine,draw:seconds=>engine.draw(size,seconds)};
   }
 
   // A WebGL canvas cannot change context type; preserve its accessible name on the replacement.
   function createCanvasRenderer() {
-    const replacement=canvas.cloneNode(false);canvas.replaceWith(replacement);
+    const replacement=canvas.cloneNode(false);replacement.setAttribute("aria-label","兼容黑洞粒子投影，不含引力透镜或视界内计算；拖动调视角、滚轮缩放、空格暂停。");canvas.replaceWith(replacement);
     const context=replacement.getContext("2d");if(!context)throw new Error("Canvas unavailable");
     let profile=null;
     return {
@@ -127,8 +136,7 @@
           context.beginPath();context.arc(cx+px*scale,cy-py*scale,dpr*(.55+particles[n+3]*.55),0,Math.PI*2);context.fill();
         }
         context.globalCompositeOperation="source-over";
-        // Match the reversible horizon fade used by the WebGL display pass.
-        if(flight.fade>0){context.fillStyle=`rgba(0,0,0,${flight.fade})`;context.fillRect(0,0,w,h);}
+        // The compatibility projection does not fabricate a black crossing.
       }
     };
   }
@@ -139,36 +147,72 @@
     const bounds=scene.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);
     size={width:Math.round(bounds.width*dpr),height:Math.round(bounds.height*dpr),dpr,scale:Math.min(bounds.width,bounds.height)*dpr*.028*state.viewZoom};
     activeCanvas().width=size.width;activeCanvas().height=size.height;requestRender();
+    syncPanelLayout();
+  }
+  function syncPanelLayout() {
+    if(!shell.open){
+      scene.style.setProperty("--panel-shift-x","0px");scene.style.setProperty("--panel-shift-y","0px");scene.style.setProperty("--panel-height","0px");
+      return;
+    }
+    // Keep the canvas clearance tied to the rendered panel, including wrapped
+    // feedback and safe-area changes, instead of duplicating CSS height guesses.
+    const panelBounds=panel.getBoundingClientRect(),sceneBounds=scene.getBoundingClientRect(),compact=(window.innerWidth||sceneBounds.width)<=600;
+    scene.style.setProperty("--panel-height",`${Math.max(0,panelBounds.height)}px`);
+    scene.style.setProperty("--panel-shift-x",compact?"0px":`${-Math.min(panelBounds.width,sceneBounds.width)/2}px`);
+    scene.style.setProperty("--panel-shift-y",compact?`${-panelBounds.height/2}px`:"0px");
   }
   function animate(now) {
     frame=0;
     // Hidden-page suspension and bounded elapsed time avoid jumps after returning to the page.
     const elapsed=Math.max(0,Math.min((now-lastTime)/1000,.05));
-    if(!state.paused&&!document.hidden)state.time+=elapsed*state.speed;
+    const movie=astrophysics.scenes[state.scene].flow==="grmhd",ready=!movie||renderer.metrics?.dataStatus==="ready";
+    if(!state.paused&&!document.hidden&&ready){
+      if(state.falling){
+        const m=astrophysics.model(state);state.flightRadius=astrophysics.advanceFall(state.flightRadius,m,state.tilt,elapsed*state.speed*8);
+        state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);
+        if(state.flightRadius<=astrophysics.minimumRadius(m,"infall")+1e-9){state.falling=false;state.paused=true;updateUI("旅程已跨越外视界；暂停在当前观察位置，Esc 返回。");}
+      } else state.time+=elapsed*state.speed;
+    }
     const movingBefore=state.viewZoom!==state.zoom;
     state.viewZoom=navigation.smoothZoom(state.viewZoom,state.zoom,elapsed,state.reducedMotion);
     size.scale=Math.min(size.width,size.height)*.028*state.viewZoom;
-    const moving=state.viewZoom!==state.zoom;
-    if(movingBefore&&!moving)renderer.refine?.();
-    const flight=navigation.view(state.viewZoom,state.reducedMotion);
+    const moving=state.viewZoom!==state.zoom,wasInteracting=state.interacting;
+    state.interacting=gestures.active||rangePointers.size>0||moving||(state.falling&&!state.paused);
+    // Finishing a drag, journey or eased zoom must refine even if the final
+    // camera values are unchanged from the last coarse frame.
+    if((movingBefore&&!moving)||(wasInteracting&&!state.interacting))renderer.refine?.();
+    let flight=renderer.physical?astrophysics.camera(state,astrophysics.model(state)):navigation.view(state.viewZoom,state.reducedMotion);
+    if(movie&&350+state.time*8+flight.coordinateTime>770){
+      // Keep a genuine worldline event within the finite movie window. During
+      // automatic travel stop at the last available event; manual inspection
+      // may select the last available frame for its chosen observation point.
+      const m=astrophysics.model(state),available=Math.max(0,770-350-state.time*8);
+      if(state.falling){let lo=astrophysics.minimumRadius(m,"infall"),hi=m.initialObserverDistance;for(let i=0;i<28;i++){const r=(lo+hi)/2,c=astrophysics.camera({...state,flightRadius:r},m);if(c.coordinateTime>available)lo=r;else hi=r;}state.flightRadius=(lo+hi)/2;state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);}
+      else state.time=Math.max(0,(770-350-flight.coordinateTime)/8);
+      state.falling=false;state.paused=true;flight=astrophysics.camera(state,m);updateUI("已到该观察位置的片段末时刻，画面暂停。");
+    }
     // Idle drift runs only for the full-view framing: the zoom journey owns the orbit
     // beyond 1.4x, the open panel keeps the stage, and a recent interaction holds it off.
     // Reduced motion freezes the camera immediately, even when disk playback is enabled.
     if(state.reducedMotion)driftRate=0;
     else if(!state.paused&&!document.hidden){
-      const suppressed=gestures.active||shell.open||flight.stage!=="observe"||(driftUntil!==null&&now-driftUntil<navigation.drift.waitSeconds*1000);
+      const suppressed=state.falling||gestures.active||rangePointers.size>0||shell.open||flight.stage!=="observe"||(driftUntil!==null&&now-driftUntil<navigation.drift.waitSeconds*1000);
       const advanced=navigation.driftStep(driftAngle,driftRate,elapsed,suppressed);
       driftAngle=advanced.angle;driftRate=advanced.rate;state.drift=driftAngle;
     }
     if(flight.stage!==flightStage){
       flightStage=flight.stage;
       flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
-      flightStatus.textContent=flightStage==="inside"?"已进入视界 · 缩小或按 Esc 返回":"接近视界 · 缩小可返回";
+      flightStatus.textContent=!renderer.physical?"兼容粒子投影 · 未计算视界内观察":flightStage==="inside"?"已跨越外视界 · 外界光仍可抵达 · Esc 返回":state.observer==="static"?"接近静止观察极限 · 可切换自由落体":"沿自由落体轨迹接近视界 · Esc 返回";
     }
     lastTime=now;renderer.draw(elapsed);
-    // Camera easing settles while particles are paused. Park at the opaque endpoint
-    // instead of spending GPU work on invisible particles; any input wakes the view.
-    if((moving||(!state.paused&&flight.fade<1))&&!document.hidden&&!contextLost&&!frame)frame=requestAnimationFrame(animate);
+    updateTimingReadout();
+    if(movie&&renderer.metrics?.dataStatus!=="ready"){flightStatus.hidden=false;flightStatus.textContent=renderer.metrics?.dataStatus==="error"?"热流片段未能载入 · 展开控制选择热盘或刷新重试":"正在载入热流模拟片段…";}
+    else flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
+    document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}`;
+    if(renderer.metrics?.movieEnded&&!state.paused){state.paused=true;state.falling=false;updateUI("热流模拟片段播放结束；重置或重新选择场景可重播。");}
+    // Interior observers still receive light. No cinematic opacity parks them.
+    if((moving||!state.paused)&&!document.hidden&&!contextLost&&!frame)frame=requestAnimationFrame(animate);
   }
   function requestRender() {
     if(frame||document.hidden||!renderer||contextLost)return;
@@ -182,23 +226,65 @@
   }
   if(renderer.kind==="canvas") {
     defaults.density=5000;state.density=5000;fields.density.min="1000";fields.density.max="5000";fields.density.step="500";
-    status.textContent="已启用兼容画面，最多显示 5,000 颗粒子。";
+    Object.values(choices).forEach(element=>element.disabled=true);fields.charge.disabled=true;fields.exposure.disabled=true;
+    defaults.observer="static";state.observer="static";document.querySelector('label[for="density"]').textContent="粒子数量";
+    document.querySelectorAll('[data-model="reissner"],[data-model="kerr-newman"]').forEach(button=>button.disabled=true);
+    status.textContent="兼容粒子投影；热流、偏振和视界内观察需要 WebGL2。";
+  }
+  // Compare effective spin/charge, not dormant slider values in metrics that
+  // suppress them. Framing, playback, display and exposure are independent.
+  function isPresetCustomized(model) {
+    const preset=astrophysics.scenes[state.scene],same=(a,b)=>Math.abs(a-b)<=1e-9;
+    return state.model!==preset.model||!same(model.spin,preset.spin)||!same(model.charge||0,preset.charge)||state.band!==preset.band;
+  }
+  function updateTimingReadout() {
+    const metrics=renderer.metrics,source=metrics?.timingSource;
+    const label={"gpu-query":"GPU 查询","gpu-query-pending":"等待 GPU 查询","cpu-submission":"CPU 提交耗时（GPU 计时不可用）",mixed:"混合（GPU 查询与 CPU 提交）"}[source]||"等待首帧计时";
+    document.querySelector("#timing-source").textContent=renderer.physical?`计时来源：${label}`:"计时来源：Canvas 投影";
   }
   function snapshot() {
-    const model=physics.model(state);
-    return {model:state.model,spin:model.spin,isco:model.isco,tilt:state.tilt,speed:state.speed,density:renderer.count(),zoom:state.zoom,flight:navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
+    const model=renderer.physical?astrophysics.model(state):physics.model(state);
+    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,falling:state.falling,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
   }
   function updateUI(message) {
-    const model=physics.model(state);
-    const values={spin:model.spin.toFixed(2),tilt:`${state.tilt}°`,speed:`${state.speed.toFixed(1)} ×`,density:renderer.count().toLocaleString("zh-CN"),zoom:`${state.zoom.toFixed(1)} ×`};
+    const model=renderer.physical?astrophysics.model(state):physics.model(state);
+    const recorded=renderer.physical&&model.flow==="grmhd";
+    const customized=isPresetCustomized(model);
+    document.querySelector("#preset-customized").hidden=!customized;
+    document.querySelector("#preset-customized-help").hidden=!customized;
+    document.querySelector("#restore-preset").hidden=!customized;
+    document.querySelector("#physics-help").textContent=recorded?"模拟数据固定为克尔时空，a=0.9375、Q=0；请先选择热盘预设再调整时空。":"调整当前场景预设的物理参数。";
+    const spinBound=Math.sqrt(Math.max(0,.998**2-(model.charge||0)**2));
+    fields.spin.min=String(-spinBound);fields.spin.max=String(spinBound);
+    fields.charge.max=String(Math.min(.95,Math.sqrt(Math.max(0,.998**2-model.spin**2))));
+    const values={spin:model.spin.toFixed(3),charge:(model.charge||0).toFixed(2),tilt:`${state.tilt}°`,speed:`${state.speed.toFixed(1)} ×`,density:state.density.toLocaleString("zh-CN"),zoom:`${state.zoom.toFixed(1)} ×`,exposure:`${state.exposure.toFixed(2)} ×`};
     Object.entries(fields).forEach(([key,element])=>{
-      const value=key==="spin"?model.spin:state[key];element.value=String(value);
-      element.style.setProperty("--progress",`${(value-Number(element.min))/(Number(element.max)-Number(element.min))*100}%`);
+      const value=key==="spin"?model.spin:key==="charge"?(model.charge||0):state[key];element.value=String(value);
+      const span=Number(element.max)-Number(element.min);
+      element.style.setProperty("--progress",`${span>0?(value-Number(element.min))/span*100:0}%`);
       element.setAttribute("aria-valuetext",values[key]);document.getElementById(`${key}-value`).textContent=values[key];
     });
-    fields.spin.disabled=state.model==="schwarzschild";
+    // Native sliders expose the joint subextremal constraint before input.
+    fields.spin.disabled=!["kerr","kerr-newman"].includes(state.model)||recorded;
+    fields.charge.disabled=!["reissner","kerr-newman"].includes(state.model)||recorded||!renderer.physical;
+    Object.entries(choices).forEach(([key,element])=>element.value=state[key]);
+    // The current hot-plasma solver is monochromatic at 230 GHz. Disabling
+    // other bands is preferable to presenting a single-frequency value as a
+    // visible/X-ray band integral; those bands remain available for thermal disks.
+    for(const option of choices.band.options||[])option.disabled=recorded&&option.value!=="radio";
+    document.querySelector("#mass-value").textContent=model.mass?`${model.mass.toLocaleString("zh-CN")} M☉`:"投影示意";
+    document.querySelector("#accretion-value").textContent=!renderer.physical?"未标定":model.mdot?model.mdot.toExponential(1):"无吸积";
+    document.querySelector("#band-help").textContent={visible:"380–780 nm · 光谱积分",xray:"0.5–10 keV · 强度显色",radio:"230 GHz · 强度显色",bolometric:"总辐射 · 强度显色"}[state.band];
+    document.querySelector("#display-help").textContent={intensity:"颜色由波段与辐射强度决定。",linear:"短线方向为线偏振方向，长度对应偏振比例。",circular:"橙色为正 V，蓝色为负 V；比例显示增益 20。",accuracy:"粉色为未收敛，红色为无效；绿色显示局部积分误差。"}[state.display];
     document.querySelector("#isco-value").textContent=`${model.isco.toFixed(2)} r_g`;
-    for(const key of ["model"])document.querySelectorAll(`[data-${key}]`).forEach(button=>button.setAttribute("aria-pressed",String(button.dataset[key]===state[key])));
+    document.querySelectorAll("[data-model]").forEach(button=>{
+      button.setAttribute("aria-pressed",String(button.dataset.model===state.model));
+      button.disabled=recorded&&button.dataset.model!=="kerr"||!renderer.physical&&["reissner","kerr-newman"].includes(button.dataset.model);
+      button.title=recorded&&button.dataset.model!=="kerr"?"模拟数据固定为克尔时空，a=0.9375、Q=0":"";
+    });
+    document.querySelector("#computational-radius-value").textContent=renderer.physical?`${model.computationalRadius} r_g`:"投影示意";
+    document.querySelector("#observer-distance-value").textContent=renderer.physical?`${model.initialObserverDistance} r_g`:"投影示意";
+    updateTimingReadout();
     document.querySelectorAll("[data-preset]").forEach(button=>{
       const chosen=button.dataset.preset==="top"?state.tilt===78&&state.zoom===.9:state.tilt===18&&state.zoom===1;
       button.setAttribute("aria-pressed",String(chosen));
@@ -206,39 +292,97 @@
     document.querySelector("#pause").setAttribute("aria-pressed",String(state.paused));
     document.querySelector("#pause-label").textContent=state.paused?"播放":"暂停";
     document.querySelector("#pause-icon").setAttribute("d",state.paused?"M6 4l9 6-9 6Z":"M7 4v12M13 4v12");
-    document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} PT`;
-    document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容画面":state.paused?"画面已暂停":"实时粒子成像";
+    document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}`;
+    document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容示意":state.paused?"画面已暂停":"相对论辐射成像";
+    const fallButton=document.querySelector("#fall");fallButton.disabled=!renderer.physical||state.reducedMotion;fallButton.setAttribute("aria-pressed",String(state.falling));fallButton.textContent=state.falling?"停止自由落体旅程":"开始自由落体旅程";
     if(message)status.textContent=message;
+  }
+  // Selection and restoration use exactly the same initial physics/camera
+  // patch; only an explicit configure call can override those preset values.
+  function presetSettings(sceneId) {
+    const preset=astrophysics.scenes[sceneId];
+    return {scene:sceneId,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:preset.observer||defaults.observer,zoom:defaults.zoom,yaw:defaults.yaw,falling:false,time:0};
   }
   function applySettings(settings,message) {
     // Check the entire update before changing state so failed agent input is atomic.
-    const limits={spin:[0,.95],tilt:[8,85],speed:[.1,3],density:[Number(fields.density.min),Number(fields.density.max)],zoom:[navigation.limits.min,navigation.limits.max]};
+    const limits={spin:[-.998,.998],charge:[0,.95],tilt:[-89,89],speed:[.1,3],density:[Number(fields.density.min),Number(fields.density.max)],zoom:[navigation.limits.min,navigation.limits.max],exposure:[.05,5]};
     for(const [key,value] of Object.entries(settings)) {
       if(Object.hasOwn(limits,key)) {
         const [min,max]=limits[key];
         if(typeof value!=="number"||!Number.isFinite(value)||value<min||value>max)throw new Error(`${key} must be between ${min} and ${max}`);
-        if((key==="tilt"||key==="density")&&!Number.isInteger(value))throw new Error(`${key} must be an integer`);
-      } else if(key==="model") {if(!["schwarzschild","kerr"].includes(value))throw new Error("Unsupported model");}
+        if(key==="density"&&!Number.isInteger(value))throw new Error(`${key} must be an integer`);
+      } else if(key==="model") {if(!["schwarzschild","kerr","reissner","kerr-newman"].includes(value))throw new Error("Unsupported model");}
+      else if(key==="scene") {if(!Object.hasOwn(astrophysics.scenes,value))throw new Error("Unsupported scene");}
+      else if(key==="band") {if(!["visible","xray","radio","bolometric"].includes(value))throw new Error("Unsupported band");}
+      else if(key==="display") {if(!["intensity","linear","circular","accuracy"].includes(value))throw new Error("Unsupported display");}
+      else if(key==="observer") {if(!["static","infall"].includes(value))throw new Error("Unsupported observer");}
       else if(key==="paused") {if(typeof value!=="boolean")throw new Error("paused must be a boolean");}
+      else if(key==="falling") {if(typeof value!=="boolean")throw new Error("falling must be a boolean");}
       else if(key==="yaw") {if(typeof value!=="number"||!Number.isFinite(value))throw new Error("yaw must be finite");}
       else throw new Error(`Unknown parameter: ${key}`);
     }
-    Object.assign(state,settings);
+    let patch={...settings};
+    const presetApplied=Object.hasOwn(patch,"scene");
+    if(presetApplied)patch={...presetSettings(patch.scene),...patch,time:0};
+    if(patch.falling===true)patch.observer="infall";
+    const next={...state,...patch},candidate=astrophysics.model(next);
+    if(candidate.spin**2+candidate.charge**2>.998**2+1e-12)throw new Error("Spin and charge must describe a subextremal black hole");
+    // Reject incompatible metrics before touching any state, including time,
+    // camera and playback. Changing datasets always requires an explicit scene.
+    if(candidate.flow==="grmhd"&&(next.model!=="kerr"||next.spin!==.9375||next.charge!==0))throw new Error("模拟数据固定为克尔时空，a=0.9375、Q=0；请主动选择热盘预设后再修改。");
+    if(candidate.flow==="grmhd"&&next.band!=="radio")throw new Error("The recorded hot-flow model currently supports the 230 GHz band");
+    if(patch.falling&&(!renderer.physical||state.reducedMotion))throw new Error("Automatic free fall requires WebGL2 and motion enabled");
+    if(!renderer.physical&&(["reissner","kerr-newman"].includes(next.model)||["scene","band","display","observer","charge"].some(key=>Object.hasOwn(settings,key)&&next[key]!==state[key])))throw new Error("Physical observation modes require WebGL2");
+    // Only an actual change of a camera field resets the journey. Key presence is
+    // not enough: requesting free fall always re-states observer=infall, and that
+    // repeated value must not discard an already calibrated lens.
+    const cameraChange=["scene","model","observer","spin","charge","zoom","yaw","tilt"].some(key=>Object.hasOwn(patch,key)&&patch[key]!==state[key]);
+    const resuming=patch.falling===true&&!cameraChange&&Number.isFinite(state.flightRadius)&&Number.isFinite(state.flightLens);
+    if(cameraChange){state.falling=false;state.flightRadius=null;state.flightLens=null;}
+    const becamePaused=!state.paused&&next.paused;
+    Object.assign(state,patch);
+    if(presetApplied){state.viewZoom=state.zoom;driftAngle=state.drift=0;driftRate=0;markDriftInteraction();}
+    // Resuming keeps the lens that fixed the journey's field of view; animate has
+    // replaced viewZoom with the journey's own zoom, so re-deriving the lens from
+    // it would change the framing mid-fall.
+    if(patch.falling===true){const camera=astrophysics.camera(state,candidate);state.flightRadius=camera.r;if(!resuming)state.flightLens=state.viewZoom*camera.r;}
     if(state.paused&&frame){cancelAnimationFrame(frame);frame=0;}
+    if(becamePaused)renderer.refine?.();
     updateUI(message);requestRender();return snapshot();
   }
-  Object.entries(fields).forEach(([key,element])=>element.addEventListener("input",()=>applySettings({[key]:Number(element.value)})));
-  document.querySelectorAll("[data-model]").forEach(button=>button.addEventListener("click",()=>applySettings({model:button.dataset.model},button.dataset.model==="kerr"?"已切换至克尔旋转模型。":"已切换至史瓦西非旋转模型。")));
+  Object.entries(fields).forEach(([key,element])=>{
+    element.addEventListener("input",()=>{try{applySettings({[key]:Number(element.value)});}catch(error){updateUI(error.message);}});
+    element.addEventListener("pointerdown",event=>{if(event.button!==0)return;if(key!=="exposure")rangePointers.add(event.pointerId);markDriftInteraction();requestRender();});
+  });
+  const finishRange=event=>{
+    if(!rangePointers.delete(event.pointerId))return;
+    markDriftInteraction();renderer.refine?.();requestRender();
+  };
+  document.addEventListener("pointerup",finishRange);document.addEventListener("pointercancel",finishRange);
+  Object.entries(choices).forEach(([key,element])=>element.addEventListener("change",()=>{try{applySettings({[key]:element.value});}catch(error){updateUI(error.message);}}));
+  document.querySelectorAll("[data-model]").forEach(button=>button.addEventListener("click",()=>{try{
+    const model=button.dataset.model,patch={model};
+    if(["reissner","kerr-newman"].includes(model)){patch.charge=state.charge||.6;if(model==="kerr-newman")patch.spin=Math.sign(state.spin||1)*Math.min(Math.abs(state.spin),Math.sqrt(.998**2-patch.charge**2)*.99);}
+    applySettings(patch,"黑洞时空模型已切换。");
+  }catch(error){updateUI(error.message);}}));
   document.querySelectorAll("[data-preset]").forEach(button=>button.addEventListener("click",()=>{
     const top=button.dataset.preset==="top";applySettings({tilt:top?78:18,zoom:top ? .9 : 1,yaw:0},top?"已切换至俯瞰视角。":"已切换至电影视角。");
   }));
-  document.querySelector("#pause").addEventListener("click",()=>applySettings({paused:!state.paused},state.paused?"粒子继续旋转。":"画面已暂停。"));
+  document.querySelector("#pause").addEventListener("click",()=>applySettings({paused:!state.paused},state.paused?"模拟继续播放。":"画面已暂停。"));
+  document.querySelector("#fall").addEventListener("click",()=>applySettings({falling:!state.falling,paused:state.falling},state.falling?"旅程已停止，暂停在当前观察位置。":"沿当前自由落体轨迹接近，操作镜头可停止旅程。"));
+  document.querySelector("#restore-preset").addEventListener("click",()=>{gestures.cancel();applySettings({scene:state.scene},"已恢复场景预设的物理参数、波段与初始视角。");});
   document.querySelector("#reset").addEventListener("click",()=>{gestures.cancel();applySettings({...defaults},"观测参数已重置。");});
 
-  shell.addEventListener("toggle",()=>{
+  shell.addEventListener("toggle",event=>{
+    // Native details events are currently non-bubbling, but keep the target
+    // guard explicit so future nested disclosures cannot move the canvas.
+    if(event.target&&event.target!==shell)return;
     toggle.title=shell.open?"收起观测控制":"展开观测控制";
+    toggle.setAttribute("aria-label",shell.open?"收起观测控制":"展开观测控制");
     // The view pans away from the open panel so the hole never sits behind it.
     scene.classList.toggle("controls-open",shell.open);
+    syncPanelLayout();
+    requestAnimationFrame(syncPanelLayout);
     markDriftInteraction();
   });
   document.addEventListener("keydown",event=>{
@@ -257,17 +401,17 @@
   });
   document.addEventListener("fullscreenchange",()=>{document.querySelector("#fullscreen-label").textContent=document.fullscreenElement?"退出全屏":"全屏";fullButton.setAttribute("aria-pressed",String(Boolean(document.fullscreenElement)));resize();});
   document.addEventListener("visibilitychange",()=>{if(document.hidden){if(frame)cancelAnimationFrame(frame);frame=0;}else requestRender();});
-  reducedMotion.addEventListener("change",event=>{state.reducedMotion=event.matches;if(event.matches)applySettings({paused:true},"已按减少动态效果偏好暂停，可点击播放继续观测。");else requestRender();});
+  reducedMotion.addEventListener("change",event=>{state.reducedMotion=event.matches;if(event.matches)applySettings({paused:true,falling:false},"已按减少动态效果偏好暂停；可播放物质演化，镜头保持静止。");else {updateUI();requestRender();}});
 
   const surface=activeCanvas();
   // The gesture owner holds idle drift for captured pointers and native trackpad
   // gestures alike; ignored buttons never latch a hold, and wheel uses the idle window.
-  const gestures=navigation.bind(surface,{read:()=>state,change:settings=>{markDriftInteraction();applySettings(settings);},finish:()=>{markDriftInteraction();renderer.refine?.();}});
-  window.addEventListener("blur",gestures.cancel);
+  const gestures=navigation.bind(surface,{read:()=>state,change:settings=>{markDriftInteraction();applySettings(settings);},finish:()=>{markDriftInteraction();renderer.refine?.();requestRender();}});
+  window.addEventListener("blur",()=>{gestures.cancel();if(rangePointers.size){rangePointers.clear();renderer.refine?.();requestRender();}});
   window.addEventListener("pagehide",event=>{if(!event.persisted)gestures.dispose();});
   surface.addEventListener("keydown",event=>{
     if(event.ctrlKey||event.metaKey)return;
-    const edits={ArrowLeft:{yaw:state.yaw-.12},ArrowRight:{yaw:state.yaw+.12},ArrowUp:{tilt:Math.min(85,state.tilt+2)},ArrowDown:{tilt:Math.max(8,state.tilt-2)},"+":{zoom:navigation.clampZoom(state.zoom*1.15)},"=":{zoom:navigation.clampZoom(state.zoom*1.15)},"-":{zoom:navigation.clampZoom(state.zoom/1.15)}," ":{paused:!state.paused}};
+    const edits={ArrowLeft:{yaw:state.yaw-.12},ArrowRight:{yaw:state.yaw+.12},ArrowUp:{tilt:Math.min(89,state.tilt+2)},ArrowDown:{tilt:Math.max(-89,state.tilt-2)},"+":{zoom:navigation.clampZoom(state.zoom*1.15)},"=":{zoom:navigation.clampZoom(state.zoom*1.15)},"-":{zoom:navigation.clampZoom(state.zoom/1.15)}," ":{paused:!state.paused}};
     if(!Object.hasOwn(edits,event.key))return;event.preventDefault();markDriftInteraction();applySettings(edits[event.key]);
   });
   if(renderer.kind==="webgl") {
@@ -283,10 +427,13 @@
   if(modelContext?.registerTool) {
     const lifecycle=new AbortController();
     const register=tool=>{try{Promise.resolve(modelContext.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{});}catch{/* Experimental registry support is optional. */}};
-    register({name:"get_observation",title:"读取观测参数",description:"Read the black-hole model, effective spin, ISCO, rendered particle count, and collapsed control state.",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},execute(input){if(input&&Object.keys(input).length)throw new Error("No arguments accepted");return snapshot();}});
-    register({name:"configure_observation",title:"调整黑洞观测",description:"Configure the visible local particle view with Schwarzschild or Kerr parameters. Larger zoom means a closer view. Controls stay collapsed unless the user opens them.",inputSchema:{type:"object",properties:{model:{type:"string",enum:["schwarzschild","kerr"]},spin:{type:"number",minimum:0,maximum:.95},tilt:{type:"integer",minimum:8,maximum:85},speed:{type:"number",minimum:.1,maximum:3},density:{type:"integer",minimum:Number(fields.density.min),maximum:Number(fields.density.max)},zoom:{type:"number",minimum:navigation.limits.min,maximum:navigation.limits.max},paused:{type:"boolean"}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute(input){if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Expected an observation object");return applySettings(input,"观测参数已更新。");}});
+    register({name:"get_observation",title:"读取观测参数",description:"Read physical scene, spacetime, observer, band, actual ray samples and renderer convergence.",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},execute(input){if(input&&Object.keys(input).length)throw new Error("No arguments accepted");return snapshot();}});
+    register({name:"configure_observation",title:"调整黑洞观测",description:"Configure spacetime, physical scene, observing band and timelike observer. Density is the target ray-sampling budget, not gas density. Falling starts/stops a proper-time geodesic journey. Controls stay collapsed.",inputSchema:{type:"object",properties:{scene:{type:"string",enum:Object.keys(astrophysics.scenes)},model:{type:"string",enum:["schwarzschild","kerr","reissner","kerr-newman"]},spin:{type:"number",minimum:-.998,maximum:.998},charge:{type:"number",minimum:0,maximum:.95},band:{type:"string",enum:["visible","xray","radio","bolometric"]},display:{type:"string",enum:["intensity","linear","circular","accuracy"]},observer:{type:"string",enum:["static","infall"]},falling:{type:"boolean"},exposure:{type:"number",minimum:.05,maximum:5},tilt:{type:"number",minimum:-89,maximum:89},speed:{type:"number",minimum:.1,maximum:3},density:{type:"integer",minimum:Number(fields.density.min),maximum:Number(fields.density.max)},zoom:{type:"number",minimum:navigation.limits.min,maximum:navigation.limits.max},paused:{type:"boolean"}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute(input){if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Expected an observation object");return applySettings(input,"观测参数已更新。");}});
     window.addEventListener("pagehide",event=>{if(!event.persisted)lifecycle.abort();});
   }
   const observer=new ResizeObserver(resize);observer.observe(scene);
+  // Details groups and live messages can change the panel height after the
+  // outer toggle; update only the clearance variables when that happens.
+  const panelObserver=new ResizeObserver(syncPanelLayout);panelObserver.observe(panel);
   updateUI(reducedMotion.matches?"已按减少动态效果偏好暂停，可点击播放继续观测。":undefined);resize();
 })();

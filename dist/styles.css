@@ -1,104 +1,166 @@
-/* One shared palette; the canvas remains the entire surface when controls are closed. */
+/* The control surface is deliberately quiet: the canvas owns the spectacle, while
+   this graphite token set keeps readings neutral and states easy to audit. */
 :root {
   color-scheme: dark;
   --bg: #08090d;
-  --surface: #14151b;
-  --text: #f4f0e9;
-  --muted: #b5b1aa;
-  --accent: #efb77b;
-  --line: #343239;
-  --focus: #f5cc9e;
-  --scroll-thumb: #514a45;
+  --surface: #15181c;
+  --surface-raised: #1a1e23;
+  --text: #dce0e3;
+  --muted: #a4adb5;
+  --accent: #98aab8;
+  --line: #343a40;
+  --focus: #98aab8;
+  --scroll-thumb: #4b535b;
+  --panel-width: 360px;
+  --panel-shift-x: 0px;
+  --panel-shift-y: 0px;
+  --panel-height: 0px;
   --font-body: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "SFMono-Regular", Consolas, monospace;
 }
 * { box-sizing: border-box; }
 html { background: var(--bg); scrollbar-color: var(--scroll-thumb) var(--surface); scrollbar-width: thin; }
-body { margin: 0; color: var(--text); font: 1rem/1.65 var(--font-body); }
+body { margin: 0; color: var(--text); font: 14px/1.55 var(--font-body); }
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-track { background: var(--surface); }
 *::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 8px; }
-*::-webkit-scrollbar-thumb:hover { background: #8c7662; }
+*::-webkit-scrollbar-thumb:hover { background: #66717a; }
 *::-webkit-scrollbar-thumb:active { background: var(--accent); }
-button, input { font: inherit; }
+button, input, select { font: inherit; }
 button, summary, input[type="range"] { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 button, summary { touch-action: manipulation; }
-button { color: inherit; transition: color 180ms, background 180ms, border-color 180ms; }
+button { color: inherit; transition: color 160ms, background 160ms, border-color 160ms; }
 button:active { transform: translateY(1px); }
-button:disabled, input:disabled { cursor: not-allowed; opacity: .4; }
-button:focus-visible, summary:focus-visible, input:focus-visible, a:focus-visible, canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; }
-a { color: var(--accent); text-decoration: none; cursor: pointer; }
-a:hover { text-decoration: underline; }
+button:disabled, input:disabled, select:disabled { cursor: not-allowed; opacity: .42; }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible, canvas:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+a { color: var(--muted); text-decoration: none; cursor: pointer; }
+a:hover { color: var(--text); text-decoration: underline; }
 p, h1, h2 { margin: 0; }
 svg { fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
-.scene { position: relative; height: 100svh; min-height: 240px; width: 100%; background: var(--bg); isolation: isolate; }
-#cosmos { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; transition: translate 220ms cubic-bezier(.2,.7,.3,1); }
+.scene { position: relative; height: 100svh; min-height: 240px; width: 100%; background: var(--bg); isolation: isolate; overflow: hidden; }
+#cosmos { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; transition: translate 180ms cubic-bezier(.2,.7,.3,1); }
 #cosmos.dragging { cursor: grabbing; }
-/* Only near the horizon: explain the reversible dark endpoint without exposing controls. */
-.flight-status { position: absolute; z-index: 1; left: 64px; right: 64px; bottom: max(24px, env(safe-area-inset-bottom)); color: var(--muted); font-size: .875rem; line-height: 1.6; text-align: center; pointer-events: none; }
-/* With controls open the view shifts half a panel width so the hole clears the panel;
-   the vacated screen edge sits behind the panel itself. */
-.scene.controls-open #cosmos { translate: calc(min(310px, 100vw - 36px) / -2) 0; }
-.control-shell { position: absolute; z-index: 2; top: max(18px, env(safe-area-inset-top)); right: max(18px, env(safe-area-inset-right)); }
-/* A native details element keeps collapsed controls unfocusable without custom visibility state. */
-.control-toggle { width: 44px; height: 44px; display: grid; place-items: center; list-style: none; border-radius: 50%; color: #bab6ae; background: #14151b66; border: 1px solid transparent; opacity: .6; transition: opacity 180ms, background 180ms; }
+/* The app writes the measured panel dimensions; no fixed viewport guess is used
+   when the canvas makes room for the open controls. */
+.scene.controls-open #cosmos { translate: var(--panel-shift-x) var(--panel-shift-y); }
+.flight-status { position: absolute; z-index: 1; left: 64px; right: 64px; bottom: max(24px, env(safe-area-inset-bottom)); color: var(--muted); font-size: 12px; line-height: 1.5; text-align: center; pointer-events: none; overflow-wrap: anywhere; }
+
+/* The outer details is the single visibility boundary. Its summary remains a
+   44px entry/close target and the panel itself owns a three-row layout. */
+.control-shell { position: absolute; z-index: 3; top: max(16px, env(safe-area-inset-top)); right: max(16px, env(safe-area-inset-right)); width: min(var(--panel-width), calc(100vw - 24px)); }
+.control-toggle { width: 44px; height: 44px; display: grid; place-items: center; margin-left: auto; list-style: none; border-radius: 50%; color: var(--muted); background: #15181caa; border: 1px solid transparent; opacity: .7; transition: opacity 160ms, background 160ms, border-color 160ms; }
 .control-toggle::-webkit-details-marker { display: none; }
-.control-toggle svg { width: 21px; height: 21px; }
+.control-toggle svg { width: 20px; height: 20px; }
 .control-toggle .close-icon { display: none; }
-.control-toggle:hover, .control-toggle:focus-visible, .control-shell[open] > .control-toggle { opacity: 1; background: var(--surface); border-color: var(--line); }
+.control-toggle:hover, .control-toggle:focus-visible, .control-shell[open] > .control-toggle { opacity: 1; color: var(--text); background: var(--surface); border-color: var(--line); }
 .control-shell[open] .settings-icon { display: none; }
 .control-shell[open] .close-icon { display: block; }
-.controls { position: absolute; top: 56px; right: 0; width: 310px; max-width: calc(100vw - 36px); max-height: calc(100svh - 94px); overflow: auto; scrollbar-gutter: stable; padding: 24px 22px; border: 1px solid var(--line); border-radius: 12px; background: #14151be8; backdrop-filter: blur(20px); box-shadow: 0 20px 60px #0005; }
-.panel-heading { margin-bottom: 22px; }
-.eyebrow { font: .75rem/1.5 var(--font-mono); letter-spacing: .16em; color: var(--muted); }
-h2 { font-size: 1.125rem; font-weight: 500; margin-top: 5px; }
-.field-label { font-size: .875rem; }
-.model-control .field-label { display: block; margin-bottom: 9px; }
-.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 8px; }
-.segmented button { min-height: 36px; padding: 6px 10px; font-size: .875rem; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); }
-.segmented button:hover { color: var(--text); background: #2a2830; }
-.segmented button[aria-pressed="true"] { color: var(--accent); background: #342a21; border-color: #67503c; }
-.model-control { margin-bottom: 20px; }
-.parameter { margin: 0 0 18px; }
-.parameter > div { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: .875rem; }
-.parameter output, .model-readout output { color: var(--accent); font: .875rem var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.parameter input { appearance: none; display: block; width: 100%; height: 28px; background: transparent; margin: 5px 0 0; padding: 0; --progress: 30%; }
+/* Keep the closed disclosure a true keyboard/accessibility boundary even though
+   the open state needs an explicit grid display value. */
+.control-shell:not([open]) > .controls { display: none; }
+.controls { position: absolute; top: 52px; right: 0; width: 100%; max-height: calc(100svh - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)) - 24px); display: grid; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #15181cf2; box-shadow: 0 18px 55px #0008; backdrop-filter: blur(18px); }
+.panel-top { min-width: 0; padding: 15px 16px 14px; border-bottom: 1px solid var(--line); }
+.panel-brand, .panel-title, .preset-heading, .panel-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.panel-brand { color: var(--muted); }
+.eyebrow, .panel-code { font: 11px/1.35 var(--font-mono); letter-spacing: .13em; }
+.panel-code { letter-spacing: .08em; opacity: .72; }
+.panel-title { align-items: baseline; margin-top: 5px; }
+h2 { font-size: 16px; font-weight: 600; line-height: 1.4; }
+.panel-subtitle { color: var(--muted); font-size: 12px; }
+.preset-choice { margin: 14px 0 0; }
+.choice { margin: 0 0 14px; }
+.choice:last-child { margin-bottom: 0; }
+.choice label, .field-label { display: block; font-size: 14px; }
+.choice label { margin-bottom: 6px; }
+.choice select { display: block; width: 100%; min-height: 44px; padding: 8px 10px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.choice select:hover:enabled { border-color: #59636c; }
+.control-help { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 5px; }
+.preset-heading { align-items: baseline; margin-bottom: 6px; }
+.preset-customized { color: var(--accent); font-size: 12px; white-space: nowrap; }
+.restore-preset { width: 100%; min-height: 44px; margin-top: 9px; padding: 7px 10px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; }
+.restore-preset:hover:enabled { border-color: #59636c; background: var(--surface-raised); }
+
+/* Only this middle row scrolls. Native details can therefore stay open in any
+   combination without moving the action bar out of reach. */
+.control-scroll { min-height: 0; overflow: auto; scrollbar-gutter: stable; padding: 0 16px; }
+.control-group { margin: 0; border-bottom: 1px solid var(--line); }
+.control-group > summary { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 12px; list-style: none; color: var(--text); font-size: 14px; font-weight: 600; }
+.control-group > summary::-webkit-details-marker { display: none; }
+.control-group > summary::before { content: ""; width: 7px; height: 7px; flex: 0 0 7px; margin-right: 1px; border-right: 1px solid var(--muted); border-bottom: 1px solid var(--muted); transform: rotate(-45deg); transition: transform 160ms; }
+.control-group > summary > span:first-child { margin-right: auto; }
+.control-group[open] > summary::before { transform: rotate(45deg); }
+.group-meta { color: var(--muted); font-size: 12px; font-weight: 400; white-space: nowrap; }
+.group-body { padding: 0 0 17px; }
+.group-body > .control-help { margin: -1px 0 14px; }
+.physical-parameters { min-width: 0; margin: 0; padding: 0; border: 0; }
+.readouts { display: grid; gap: 4px; margin: 0 0 14px; }
+.model-readout { min-height: 26px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+.model-readout output, .parameter output { color: var(--text); font: 13px/1.3 var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.model-control { margin: 0 0 15px; }
+.model-control .field-label { margin-bottom: 6px; }
+.segmented { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 6px; }
+.segmented button { min-height: 44px; padding: 6px 7px; font-size: 13px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--muted); }
+.segmented button:hover:enabled { color: var(--text); background: var(--surface-raised); }
+.segmented button[aria-pressed="true"] { color: var(--accent); background: #202930; border-color: var(--accent); }
+.parameter { margin: 0 0 14px; }
+.parameter:last-child { margin-bottom: 0; }
+.parameter > div { min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; }
+.parameter input { appearance: none; display: block; width: 100%; height: 44px; margin: 3px 0 0; padding: 0; background: transparent; --progress: 30%; }
 .parameter input::-webkit-slider-runnable-track { height: 3px; border-radius: 3px; background: linear-gradient(to right, var(--accent) var(--progress), var(--line) var(--progress)); }
-.parameter input::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
+.parameter input::-webkit-slider-thumb { appearance: none; width: 13px; height: 13px; margin-top: -5px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
 .parameter input:hover:enabled::-webkit-slider-thumb { background: var(--accent); }
 .parameter input::-moz-range-track { height: 3px; background: var(--line); }
 .parameter input::-moz-range-progress { height: 3px; background: var(--accent); }
 .parameter input::-moz-range-thumb { width: 9px; height: 9px; border: 2px solid var(--accent); border-radius: 50%; background: var(--surface); }
-.model-readout { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: .75rem; color: var(--muted); margin: -5px 0 22px; }
-.model-readout output { font-size: .75rem; }
-.presets { margin-bottom: 22px; }
-.scene-tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; padding-top: 21px; border-top: 1px solid var(--line); }
-.scene-tools button { display: flex; justify-content: center; align-items: center; gap: 5px; min-height: 42px; padding: 8px 3px; font-size: .875rem; border: 1px solid var(--line); border-radius: 7px; background: #1a191e; white-space: nowrap; }
-.scene-tools button:hover { border-color: #857462; background: #30261e; }
+.presets { margin: 0 0 14px; }
+.journey-button { width: 100%; min-height: 44px; margin: 1px 0 0; padding: 8px 12px; color: var(--text); background: transparent; border: 1px solid var(--line); border-radius: 6px; font-size: 14px; cursor: pointer; }
+.journey-button:hover:enabled, .journey-button[aria-pressed="true"] { border-color: var(--accent); background: #202930; }
+.interaction-help { color: var(--muted); font-size: 12px; line-height: 1.55; margin-top: 12px; }
+.group-body > p:not(.control-help) { color: var(--muted); font-size: 12px; line-height: 1.65; margin: 0 0 12px; }
+.model-readouts { margin: 3px 0 10px; }
+.reference-list { display: grid; gap: 7px; margin-top: 12px; }
+.reference-list a { font: 12px/1.45 var(--font-mono); overflow-wrap: anywhere; }
+
+/* The footer is outside the scroll area so playback, reset, fullscreen and
+   feedback remain available while a group is long or a message wraps. */
+.panel-actions { min-width: 0; padding: 12px 16px 14px; border-top: 1px solid var(--line); background: var(--surface); }
+.scene-tools { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.scene-tools button { min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 7px 4px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 6px; font-size: 14px; white-space: nowrap; }
+.scene-tools button:hover:enabled { border-color: #59636c; background: #20252a; }
 .scene-tools svg { width: 15px; height: 15px; }
-.interaction-help { font-size: .75rem; line-height: 1.85; color: var(--muted); margin-top: 15px; }
-.panel-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; color: var(--muted); font-size: .75rem; }
-#particle-count { font-family: var(--font-mono); }
-.status { font-size: .75rem; line-height: 1.7; color: var(--accent); min-height: 20px; margin-top: 9px; }
-.model-notes { margin-top: 15px; border-top: 1px solid var(--line); padding-top: 15px; }
-.model-notes summary { font-size: .875rem; color: var(--muted); }
-.model-notes summary:hover { color: var(--text); }
-.model-notes p { font-size: .875rem; line-height: 1.8; color: var(--muted); margin-top: 15px; }
-.model-notes a { display: block; font: .75rem/1.7 var(--font-mono); margin-top: 12px; overflow-wrap: anywhere; }
-.noscript { position: absolute; bottom: 30px; width: 100%; text-align: center; color: var(--muted); }
+.panel-footer { align-items: baseline; margin-top: 9px; color: var(--muted); font-size: 12px; }
+#particle-count { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.status { min-height: 0; color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 6px; overflow-wrap: anywhere; }
+.status:empty { display: none; }
+.noscript { position: absolute; bottom: 30px; width: 100%; color: var(--muted); text-align: center; }
 .scene:fullscreen { width: 100%; height: 100dvh; }
-@media (max-width: 500px) {
-  /* Phones: a full-width bottom sheet grows behind the corner toggle, which stays
-     put as its close button, so no vacated strip is left uncovered beside it. */
-  .control-shell { top: auto; bottom: max(12px, env(safe-area-inset-bottom)); right: max(12px, env(safe-area-inset-right)); }
-  .control-shell[open] > .control-toggle { position: absolute; bottom: 0; right: 0; z-index: 1; }
-  .controls { top: auto; bottom: 0; width: calc(100vw - 24px); max-width: none; max-height: min(40svh, calc(100svh - 120px)); padding: 20px 18px 64px; }
-  /* The hole centers in the strip the sheet leaves above it: half of 60svh minus gutter. */
-  .scene.controls-open #cosmos { translate: 0 calc((20svh + 6px) * -1); }
-  .scene.controls-open .flight-status { bottom: calc(max(12px, env(safe-area-inset-bottom)) + min(40svh, calc(100svh - 120px)) + 12px); }
+
+@media (max-width: 600px) {
+  /* The phone sheet uses the same measured width as its canvas shift and leaves
+     a 12px safe-area gutter on both sides. */
+  .control-shell { top: auto; right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); width: auto; }
+  .controls { top: auto; bottom: 0; width: 100%; max-width: none; max-height: min(60svh, calc(100svh - 24px)); }
+  .control-shell[open] > .control-toggle { position: absolute; right: 0; bottom: 0; z-index: 4; }
+  .scene.controls-open .flight-status { bottom: calc(var(--panel-height) + max(24px, env(safe-area-inset-bottom))); }
+  .panel-top { padding-inline: 14px; }
+  .control-scroll { padding-inline: 14px; }
+  .panel-actions { padding-inline: 14px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
 }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
+
+@media (max-height: 520px) and (min-width: 601px) {
+  /* Short landscape windows give the fixed rows less chrome and let the center
+     row absorb the remaining height. */
+  .controls { top: 48px; max-height: calc(100svh - 12px); }
+  .panel-top { padding-block: 10px; }
+  .preset-choice { margin-top: 9px; }
+  .control-group > summary { min-height: 44px; }
+  .panel-actions { padding-block: 8px 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
 @media (forced-colors: active) {
   html { scrollbar-color: auto; }
   *::-webkit-scrollbar-thumb { background: ButtonText; }

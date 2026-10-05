@@ -6,12 +6,10 @@
   const smooth=value=>value*value*(3-2*value);
   function view(zoom,reducedMotion=false) {
     const progress=Math.max(0,Math.min(1,Math.log(Math.max(zoom,limits.orbitStart)/limits.orbitStart)/Math.log(limits.max/limits.orbitStart)));
-    // The shadow swallows the view well before the horizon, so dimming starts at
-    // ~6.6x (progress .72) and completes exactly at the 12x crossing endpoint.
-    const travel=smooth(progress),fade=smooth(Math.max(0,Math.min(1,(progress-.72)/.28)));
-    // Static observer frames remain outside the ergosphere. Crossing is a reversible
-    // cinematic fade, not a computed observer or scene inside the event horizon.
-    return {zoom,progress,distance:80*Math.exp(Math.log(3/80)*travel),orbit:reducedMotion?0:travel*Math.PI*2.5,fade,stage:fade>=.999?"inside":progress>=.55?"approach":progress>0?"orbit":"observe"};
+    // This legacy projection path stays at r>=3. Actual horizon crossing belongs
+    // to the timelike astrophysics camera; no cinematic opacity is added here.
+    const travel=smooth(progress);
+    return {zoom,progress,distance:80*Math.exp(Math.log(3/80)*travel),orbit:reducedMotion?0:travel*Math.PI*2.5,fade:0,stage:progress>=.55?"approach":progress>0?"orbit":"observe"};
   }
   function smoothZoom(current,target,seconds,reducedMotion=false) {
     if(reducedMotion||Math.abs(Math.log(target/current))<.001)return target;
@@ -58,7 +56,8 @@
       // One path owns zoom; cached points let single-finger dragging resume cleanly.
       if(gesture)return;
       if(pinch)change({zoom:clampZoom(pinch.zoom*distance(pinch.ids)/pinch.distance)});
-      else if(drag)change({yaw:drag.yaw+(event.clientX-drag.x)*.007,tilt:Math.round(Math.max(8,Math.min(85,drag.tilt+(event.clientY-drag.y)*.18)))});
+      // Match the native angle slider, including edge-on and underside views.
+      else if(drag)change({yaw:drag.yaw+(event.clientX-drag.x)*.007,tilt:Math.round(Math.max(-89,Math.min(89,drag.tilt+(event.clientY-drag.y)*.18)))});
     });
     function release(event){
       if(!points.delete(event.pointerId))return;

@@ -5,47 +5,134 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#08090d" />
     <title>Interstellar · 黑洞观测站</title>
-    <meta name="description" content="全屏探索黑洞粒子吸积盘。背景为沿真实逃逸光线采样的星空，靠近阴影处随引力透镜弯曲；所有观测控制默认收起。" />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308090d'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%23efb77b' stroke-width='2'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='4' fill='none' stroke='%23efb77b' stroke-width='2' transform='rotate(-20 16 16)'/%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./styles.css?v=04d3ec71087f" />
-    <!-- Physics and geometry are versioned together with the live particle renderer. -->
-    <script src="./physics.js?v=f95115eeb347" defer></script>
+    <meta name="description" content="探索黑洞的相对论辐射影像：恒星级热盘、超大质量黑洞热流、喷流、偏振和自由落体观察。" />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2308090d'/%3E%3Ccircle cx='16' cy='16' r='8' fill='none' stroke='%2398aab8' stroke-width='2'/%3E%3Cellipse cx='16' cy='16' rx='14' ry='4' fill='none' stroke='%2398aab8' stroke-width='2' transform='rotate(-20 16 16)'/%3E%3C/svg%3E" />
+    <link rel="stylesheet" href="./styles.css?v=4ecc81e9f9dc" />
+    <!-- Physical kernels and both render paths use content hashes to keep cached resources consistent. -->
+    <script src="./physics.js?v=feeabd95956b" defer></script>
     <script src="./geodesics.js?v=3994483f3e19" defer></script>
-    <script src="./navigation.js?v=1582a69bfda7" defer></script>
+    <script src="./navigation.js?v=409b42f65b6a" defer></script>
+    <!-- Shared physical kernels precede the volume transfer solver and app state. -->
+    <script src="./relativity.js?v=b3c13102811b" defer></script>
+    <script src="./astrophysics.js?v=bb5b0603989b" defer></script>
+    <script src="./plasma.js?v=a8086031977e" defer></script>
+    <script src="./physical-renderer.js?v=d46d6dc3d3a9" defer></script>
     <!-- Refresh content hashes after script edits so each deployment loads its matching renderer. -->
     <script src="./raytracer.js?v=352d044f1ce2" defer></script>
-    <script src="./app.js?v=9fc449c5eadf" defer></script>
+    <script src="./app.js?v=b713e815c3b2" defer></script>
   </head>
   <body>
     <main class="scene" id="scene" aria-label="黑洞观测站">
       <h1 class="sr-only">Interstellar 黑洞观测站</h1>
-      <canvas id="cosmos" tabindex="0" aria-label="黑洞粒子画面，背景为被引力弯曲的星空，可单指拖动、双指捏合或用滚轮缩放；放大时螺旋接近视界，缩小或 Esc 返回；方向键调视角，加减键缩放，空格播放或暂停。"></canvas>
+      <canvas id="cosmos" tabindex="0" aria-label="黑洞辐射影像，可单指拖动、双指捏合或用滚轮缩放；自由落体模式可跨越外视界，缩小或 Esc 返回；方向键调视角，加减键缩放，空格播放或暂停。"></canvas>
 
       <p class="flight-status" id="flight-status" role="status" aria-live="polite" hidden></p>
 
-      <!-- Native disclosure removes every hidden control from the keyboard and accessibility flow. -->
+      <!-- The outer disclosure owns panel visibility; inner disclosures are UI-only and never alter shared observation state. -->
       <details class="control-shell" id="control-shell">
-        <summary class="control-toggle" aria-label="观测控制" title="展开或收起观测控制">
+        <summary class="control-toggle" aria-label="展开观测控制" title="展开观测控制">
           <svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.8 3-.6 2.2-2 .9-2-.7-2 3.4 1.5 1.6-.2 2.2-1.6 1.5 2 3.5 2.2-.5 1.8 1.3.5 2.1h4l.6-2.2 2-.9 2 .7 2-3.4-1.5-1.6.2-2.2 1.6-1.5-2-3.5-2.2.5L14 5.1 13.5 3Z"/><circle cx="12" cy="12" r="3"/></svg>
           <svg class="close-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
           <span class="sr-only">观测控制</span>
         </summary>
+
         <aside class="controls" id="controls" aria-labelledby="controls-title">
-          <header class="panel-heading"><p class="eyebrow">INTERSTELLAR</p><h2 id="controls-title">观测控制</h2></header>
-          <div class="model-control"><span class="field-label">黑洞模型</span><div class="segmented" role="group" aria-label="黑洞模型"><button type="button" data-model="schwarzschild" aria-pressed="false">史瓦西</button><button type="button" data-model="kerr" aria-pressed="true">克尔</button></div></div>
-          <div class="parameter"><div><label for="spin">自旋强度</label><output id="spin-value" for="spin">0.65</output></div><input id="spin" type="range" min="0" max="0.95" value="0.65" step="0.05" /></div>
-          <div class="model-readout"><span>内侧稳定轨道</span><output id="isco-value">3.62 r_g</output></div>
-          <div class="segmented presets" role="group" aria-label="视角预设"><button type="button" data-preset="cinema" aria-pressed="true">电影视角</button><button type="button" data-preset="top" aria-pressed="false">俯瞰视角</button></div>
-          <div class="parameter"><div><label for="tilt">观测倾角</label><output id="tilt-value" for="tilt">18°</output></div><input id="tilt" type="range" min="8" max="85" value="18" step="1" /></div>
-          <div class="parameter"><div><label for="speed">旋转速度</label><output id="speed-value" for="speed">1.0 ×</output></div><input id="speed" type="range" min="0.1" max="3" value="1" step="0.1" /></div>
-          <div class="parameter"><div><label for="density">粒子密度</label><output id="density-value" for="density">32,000</output></div><input id="density" type="range" min="4000" max="60000" value="32000" step="2000" /></div>
-          <div class="parameter"><div><label for="zoom">缩放倍率</label><output id="zoom-value" for="zoom">1.0 ×</output></div><input id="zoom" type="range" min="0.65" max="12" value="1" step="0.05" /></div>
-          <div class="scene-tools" role="group" aria-label="画面操作"><button id="pause" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="pause-icon" d="M7 4v12M13 4v12"/></svg><span id="pause-label">暂停</span></button><button id="reset" type="button">重置</button><button id="fullscreen" type="button"><span id="fullscreen-label">全屏</span></button></div>
-          <p class="interaction-help">单指拖动 · 双指捏合或滚轮缩放<br />放大螺旋靠近 · 缩小返回<br />方向键调视角 · 空格暂停 · Esc 收起或返回</p>
-          <div class="panel-footer"><span id="render-state">实时粒子场</span><span id="particle-count">32,000 PT</span></div>
-          <p class="status" id="status" role="status" aria-live="polite"></p>
-          <!-- Describe the emitter model independently of the reversible camera journey. -->
-          <details class="model-notes"><summary>模型与参考</summary><p>史瓦西模型不旋转；克尔模型包含自旋。内侧稳定轨道与圆轨道角速度使用模型参数，r_g = GM/c²。</p><p>吸积盘由实时粒子绘制。内侧稳定轨道以内，粒子螺旋坠落；接近视界时，频移与光子捕获使可见光逐渐变暗。盘外辐射参考 Page–Thorne 模型，内侧辐射采用少量内缘应力与辐射压主导的简化模型。光线在 Kerr-Schild 度规中积分，背景星空随引力透镜弯曲。配色与亮度经过归一化，采用薄盘、快速光照与最近两次发光交点，未包含完整偏振或 GRMHD 演化。兼容画面采用粒子投影。</p><p>放大时镜头绕转接近视界，进入视界阶段后画面渐黑；缩小或重置可以返回。这是镜头旅程演示，不计算视界内场景。</p><a href="https://arxiv.org/abs/2405.09175" target="_blank" rel="noopener noreferrer">Mummery 等（2024）· ISCO 内的辐射</a><a href="https://github.com/baopinshui/NPGS/blob/master/NPGS/Sources/Engine/Shaders/BlackHole_common.glsl" target="_blank" rel="noopener noreferrer">NPGS / BlackHole_common.glsl</a><a href="https://github.com/jadexter/grtrans" target="_blank" rel="noopener noreferrer">grtrans / Jason Dexter</a><a href="https://arxiv.org/abs/1602.03184" target="_blank" rel="noopener noreferrer">Dexter (2016)</a><a href="https://arxiv.org/abs/0903.0620" target="_blank" rel="noopener noreferrer">Dexter &amp; Agol (2009)</a><a href="./notices.txt" target="_blank" rel="noopener noreferrer">参考与许可</a><a href="https://github.com/oseiskar/black-hole" target="_blank" rel="noopener noreferrer">oseiskar / black-hole</a><a href="https://github.com/Scenes3D/black-hole" target="_blank" rel="noopener noreferrer">Scenes3D / black-hole</a><a href="https://github.com/Niiflheim01/singularity" target="_blank" rel="noopener noreferrer">Niiflheim01 / singularity</a></details>
+          <!-- Grid rows keep the brand/preset header and action footer fixed while only this region scrolls. -->
+          <header class="panel-top">
+            <div class="panel-brand"><span class="eyebrow">INTERSTELLAR</span><span class="panel-code">OBS / 01</span></div>
+            <div class="panel-title"><h2 id="controls-title">观测控制</h2><span class="panel-subtitle">相对论辐射成像</span></div>
+            <!-- The preset remains in the fixed header so the current model is always one step away. -->
+            <div class="choice preset-choice">
+              <div class="preset-heading"><label for="scene-choice">场景预设</label><span id="preset-customized" class="preset-customized" hidden>已自定义</span></div>
+              <select id="scene-choice" aria-describedby="preset-help preset-customized-help">
+                <option value="quasar">类星体 · 光学热盘</option>
+                <option value="stellar">恒星级 · X 射线热盘</option>
+                <option value="m87">M87* · 射电热流与喷流</option>
+                <option value="sgrA">银河系中心 · 射电热流</option>
+                <option value="jet">喷流基部 · 侧面观察</option>
+                <option value="retrograde">逆行盘 · 反向自旋</option>
+                <option value="extreme">近极端克尔 · 内缘与细环</option>
+                <option value="isolated">孤立黑洞 · 星空透镜</option>
+                <option value="charged">带电黑洞 · 理论对照</option>
+                <option value="hotspot">轨道热点 · 光路时延示例</option>
+              </select>
+              <p id="preset-help" class="control-help">载入一组物理参数、波段与初始视角。</p>
+              <p id="preset-customized-help" class="control-help" hidden>预设名称表示起始配置；当前生效的物理参数或波段已偏离它。</p>
+              <button id="restore-preset" class="restore-preset" type="button" hidden>恢复预设</button>
+            </div>
+          </header>
+
+          <div class="control-scroll" aria-label="观测参数分组">
+            <!-- Physics is the only expanded group at startup; native details keeps its state during this page session. -->
+            <details class="control-group" id="physics-group" open>
+              <summary><span>物理参数</span><span class="group-meta">模型与轨道</span></summary>
+              <div class="group-body">
+                <p id="physics-help" class="control-help">调整当前场景预设的物理参数。</p>
+                <fieldset class="physical-parameters">
+                  <legend class="sr-only">物理参数</legend>
+                  <div class="readouts" aria-label="只读物理读数">
+                    <div class="model-readout"><span>模型质量</span><output id="mass-value">500,000,000 M☉</output></div>
+                    <div class="model-readout"><span>爱丁顿吸积率比</span><output id="accretion-value">1.5e-2</output></div>
+                  </div>
+                  <div class="model-control"><span class="field-label">黑洞时空</span><div class="segmented" role="group" aria-label="黑洞时空"><button type="button" data-model="schwarzschild" aria-pressed="false">史瓦西</button><button type="button" data-model="kerr" aria-pressed="true">克尔</button><button type="button" data-model="reissner" aria-pressed="false">带电静止</button><button type="button" data-model="kerr-newman" aria-pressed="false">带电旋转</button></div></div>
+                  <div class="parameter"><div><label for="spin">自旋 · 负值为逆行</label><output id="spin-value" for="spin">0.650</output></div><input id="spin" type="range" min="-0.998" max="0.998" value="0.65" step="0.001" /></div>
+                  <div class="parameter"><div><label for="charge">电荷 · 理论参数</label><output id="charge-value" for="charge">0.00</output></div><input id="charge" type="range" min="0" max="0.95" value="0" step="0.01" /></div>
+                  <div class="model-readout"><span>内侧稳定轨道</span><output id="isco-value">3.62 r_g</output></div>
+                </fieldset>
+              </div>
+            </details>
+
+            <details class="control-group" id="imaging-group">
+              <summary><span>成像设置</span><span class="group-meta">波段与采样</span></summary>
+              <div class="group-body">
+                <div class="choice"><label for="band">观测波段</label><select id="band"><option value="visible">可见光</option><option value="xray">X 射线 · 强度显色</option><option value="radio">230 GHz · 强度显色</option><option value="bolometric">总辐射 · 强度显色</option></select><p id="band-help" class="control-help">380–780 nm · 光谱积分</p></div>
+                <div class="choice"><label for="display">成像内容</label><select id="display" aria-describedby="display-help"><option value="intensity">辐射强度</option><option value="linear">强度与线偏振方向</option><option value="circular">圆偏振 · 正负显色</option><option value="accuracy">积分精度 · 诊断显色</option></select><p id="display-help" class="control-help">颜色由波段与辐射强度决定。</p></div>
+                <div class="parameter"><div><label for="exposure">曝光</label><output id="exposure-value" for="exposure">1.00 ×</output></div><input id="exposure" type="range" min="0.05" max="5" value="1" step="0.05" /></div>
+                <div class="parameter"><div><label for="density">光线采样预算</label><output id="density-value" for="density">128,000</output></div><input id="density" type="range" min="16000" max="384000" value="128000" step="16000" /></div>
+              </div>
+            </details>
+
+            <details class="control-group" id="camera-group">
+              <summary><span>镜头与播放</span><span class="group-meta">观察与旅程</span></summary>
+              <div class="group-body">
+                <div class="choice"><label for="observer">观察者</label><select id="observer"><option value="infall" selected>自由落体轨迹</option><option value="static">视界外静止观察</option></select></div>
+                <div class="segmented presets" role="group" aria-label="视角预设"><button type="button" data-preset="cinema" aria-pressed="false">电影视角</button><button type="button" data-preset="top" aria-pressed="false">俯瞰视角</button></div>
+                <div class="parameter"><div><label for="tilt">盘面仰角</label><output id="tilt-value" for="tilt">0°</output></div><input id="tilt" type="range" min="-89" max="89" value="0" step="0.5" /></div>
+                <div class="parameter"><div><label for="zoom">缩放倍率</label><output id="zoom-value" for="zoom">1.0 ×</output></div><input id="zoom" type="range" min="0.65" max="12" value="1" step="0.05" /></div>
+                <div class="parameter"><div><label for="speed">模拟播放速率</label><output id="speed-value" for="speed">1.0 ×</output></div><input id="speed" type="range" min="0.1" max="3" value="1" step="0.1" /></div>
+                <button id="fall" class="journey-button" type="button" aria-pressed="false">开始自由落体旅程</button>
+                <p class="interaction-help">单指拖动 · 双指捏合或滚轮缩放<br />自由落体模式下放大跨越外视界<br />方向键调视角 · 空格暂停 · Esc 收起或返回</p>
+              </div>
+            </details>
+
+            <!-- Explanatory copy is kept in one collapsed group so it never competes with live readings. -->
+            <details class="control-group model-notes" id="model-group">
+              <summary><span>模型与参考</span><span class="group-meta">范围与计时</span></summary>
+              <div class="group-body">
+                <p>长度单位 r_g=GM/c²，时间单位 GM/c³。自适应光线积分在外部回溯时使用外向 Kerr–Schild 坐标，进入视界时使用入向坐标。有限盘厚与光路时延参与全部影像；纯强度热盘使用标量传输，偏振和热流使用四分量传输。更高阶穿盘持续积分，直到逃逸、捕获、光学厚度饱和或数值预算耗尽。</p>
+                <p>热盘采用有限内缘应力、气体／辐射混合压力与灰大气近似；散射只在局部有效消光中近似处理，不求解多次散射及非局部光场。可见光按黑体光谱和 CIE 色匹配函数积分。X 射线、射电、总辐射及圆偏振使用标明含义的显色。曝光用于显示，不代表光度标定。</p>
+                <p>热流与喷流使用本地生成的 64×64 轴对称 GRMHD 片段，固定 a=0.9375、Q=0；质量与吸积率用于单位换算，电子温度采用模型假设。它不是持续演化的三维 GRMHD，也不是对 M87* 或银河系中心的观测拟合。热点为规定的测试热源。带电模型用于理论对照。</p>
+                <p>自由落体沿 E=1、L=0 的轨迹选取观察位置；自动旅程按固有时间推进，并计算运动像差与频移。视界内仍追踪可抵达的外界光，不额外渐黑。兼容画面只提供粒子投影。</p>
+                <div class="readouts model-readouts"><div class="model-readout"><span>计算半径</span><output id="computational-radius-value">准备中</output></div><div class="model-readout"><span>初始观察距离</span><output id="observer-distance-value">准备中</output></div></div>
+                <p id="timing-source" class="control-help">计时来源：准备中</p>
+                <nav class="reference-list" aria-label="参考链接">
+                  <a href="https://arxiv.org/abs/astro-ph/0301509" target="_blank" rel="noopener noreferrer">Gammie 等（2003）· HARM</a>
+                  <a href="https://github.com/AFD-Illinois/iharm2d_v3" target="_blank" rel="noopener noreferrer">Illinois · 轴对称 GRMHD 求解器</a>
+                  <a href="https://arxiv.org/abs/2405.09175" target="_blank" rel="noopener noreferrer">Mummery 等（2024）· 内缘辐射</a>
+                  <a href="https://arxiv.org/abs/1602.03184" target="_blank" rel="noopener noreferrer">Dexter（2016）· 偏振辐射传输</a>
+                  <a href="https://arxiv.org/abs/1801.10452" target="_blank" rel="noopener noreferrer">RAPTOR · 光路时延</a>
+                  <a href="./notices.txt" target="_blank" rel="noopener noreferrer">参考与许可</a>
+                </nav>
+              </div>
+            </details>
+          </div>
+
+          <!-- Actions and live feedback stay visible while the grouped controls scroll. -->
+          <footer class="panel-actions">
+            <div class="scene-tools" role="group" aria-label="画面操作"><button id="pause" type="button" aria-pressed="false"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="pause-icon" d="M7 4v12M13 4v12" /></svg><span id="pause-label">暂停</span></button><button id="reset" type="button">重置</button><button id="fullscreen" type="button"><span id="fullscreen-label">全屏</span></button></div>
+            <div class="panel-footer"><span id="render-state">相对论辐射成像</span><span id="particle-count">光线准备中</span></div>
+            <p class="status" id="status" role="status" aria-live="polite"></p>
+          </footer>
         </aside>
       </details>
       <noscript><p class="noscript">启用 JavaScript 后即可观测粒子黑洞。</p></noscript>
