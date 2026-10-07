@@ -15,6 +15,7 @@
   --panel-shift-x: 0px;
   --panel-shift-y: 0px;
   --panel-height: 0px;
+  --panel-header-height: 0px;
   --font-body: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "SFMono-Regular", Consolas, monospace;
 }
@@ -129,27 +130,62 @@ h2 { font-size: 16px; font-weight: 600; line-height: 1.4; }
 .scene-tools button { min-height: 44px; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 7px 4px; color: var(--text); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 6px; font-size: 14px; white-space: nowrap; }
 .scene-tools button:hover:enabled { border-color: #59636c; background: #20252a; }
 .scene-tools svg { width: 15px; height: 15px; }
+.scene-tools [hidden] { display: none; }
+/* Native full-screen support varies on mobile; available actions share the row. */
+.scene-tools:has(#fullscreen[hidden]) { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .panel-footer { align-items: baseline; margin-top: 9px; color: var(--muted); font-size: 12px; }
 #particle-count { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 /* Preserve native hidden semantics outside hot-flow scenes, including after a scene switch. */
 .solver-readout:not([hidden]) { display: grid; gap: 3px; margin-top: 7px; color: var(--muted); font: 11px/1.45 var(--font-mono); font-variant-numeric: tabular-nums; }
 .solver-readout > span { display: flex; justify-content: space-between; gap: 10px; overflow-wrap: anywhere; }
 .solver-readout output { color: var(--text); }
+.model-notes .solver-readout:not([hidden]) { margin: 0 0 14px; padding: 10px 0 12px; border-bottom: 1px solid var(--line); }
 .status { min-height: 0; color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 6px; overflow-wrap: anywhere; }
 .status:empty { display: none; }
 .noscript { position: absolute; bottom: 30px; width: 100%; color: var(--muted); text-align: center; }
 .scene:fullscreen { width: 100%; height: 100dvh; }
 
 @media (max-width: 600px) {
-  /* The phone sheet uses the same measured width as its canvas shift and leaves
-     a 12px safe-area gutter on both sides. */
+  /* The open sheet participates in layout, so its native summary can close it
+     from the header rather than covering action labels or ray counts. The svh
+     cap keeps it inside the stable canvas even as Safari's toolbar moves. */
   .control-shell { top: auto; right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); left: max(12px, env(safe-area-inset-left)); width: auto; }
-  .controls { top: auto; bottom: 0; width: 100%; max-width: none; max-height: min(60svh, calc(100svh - 24px)); }
-  .control-shell[open] > .control-toggle { position: absolute; right: 0; bottom: 0; z-index: 4; }
+  .controls { position: relative; top: auto; bottom: auto; right: auto; width: 100%; max-width: none; max-height: min(70dvh, calc(100svh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom)))); background: var(--surface); backdrop-filter: none; }
+  .control-shell[open] > .control-toggle { position: absolute; top: 10px; right: 10px; bottom: auto; z-index: 4; }
   .scene.controls-open .flight-status { bottom: calc(var(--panel-height) + max(24px, env(safe-area-inset-bottom))); }
-  .panel-top { padding-inline: 14px; }
-  .control-scroll { padding-inline: 14px; }
-  .panel-actions { padding-inline: 14px; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+  .panel-top { padding: 12px 14px 10px; }
+  .panel-brand, .panel-title { padding-right: 52px; }
+  .panel-code, .panel-subtitle { display: none; }
+  .panel-title { min-height: 24px; margin-top: 2px; }
+  .preset-choice { margin-top: 10px; }
+  .choice select { min-height: 46px; font-size: 16px; }
+  /* Opaque mobile chrome avoids a full-sheet backdrop filter while scrolling;
+     readable native actions retain a distinct gap between finger targets. */
+  .segmented { gap: 8px; }
+  .segmented button { font-size: 14px; }
+  .control-scroll { padding-inline: 14px; overscroll-behavior-y: contain; }
+  /* Read-only scene facts follow the controls on phones; the single fieldset
+     and editable DOM/tab order remain shared with the desktop interface. */
+  .physical-parameters { display: flex; flex-direction: column; }
+  .physical-parameters > .readouts { order: 1; margin: 14px 0 0; padding-top: 10px; border-top: 1px solid var(--line); }
+  .parameter input::-webkit-slider-thumb { width: 22px; height: 22px; margin-top: -9.5px; }
+  .parameter input::-moz-range-thumb { width: 18px; height: 18px; }
+  .reference-list a { min-height: 44px; display: flex; align-items: center; }
+  .reference-list, .scene-tools { gap: 8px; }
+  .scene-tools button { min-height: 46px; font-size: 16px; }
+  .panel-actions { padding: 10px 14px 12px; }
+  .panel-footer { flex-wrap: wrap; gap: 3px 10px; }
+  #particle-count { margin-left: auto; text-align: right; overflow-wrap: anywhere; }
+  .solver-readout > span { flex-wrap: wrap; justify-content: flex-start; gap: 2px 6px; }
+}
+
+@media (max-width: 600px) and (max-height: 520px) {
+  /* Scroll the body and actions together at short heights, retaining an opaque
+     sticky header so the close button never floats over scrolled parameters.
+     Measured scroll padding also keeps focused controls below that header. */
+  .controls { display: block; max-height: min(85dvh, calc(100svh - max(12px, env(safe-area-inset-top)) - max(12px, env(safe-area-inset-bottom)))); overflow-y: auto; scroll-padding-top: var(--panel-header-height); }
+  .panel-top { position: sticky; top: 0; z-index: 2; background: var(--surface); }
+  .control-scroll { overflow: visible; }
 }
 
 @media (max-height: 520px) and (min-width: 601px) {

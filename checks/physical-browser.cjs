@@ -128,7 +128,11 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   await page.waitForFunction(()=>{const r=observationTools.get_observation.execute({}).render;return r.diagnosticCurrent&&!r.diagnosticPending;});obs=await observe();assert.equal(obs.spin,.9375);assert.equal(obs.render.unfinishedRays,0);assert.equal(obs.render.invalidRays,0,JSON.stringify(obs));
   await page.screenshot({path:path.join(output,'m87-polarization.png')});
   await page.locator('.control-toggle').click();assert.equal(await page.locator('#spin').isDisabled(),true);assert.equal(await page.locator('#band option[value="visible"]').isDisabled(),true);
+  // Solver diagnostics belong to the model disclosure rather than consuming
+  // fixed footer space. Open its native disclosure to verify actual visibility.
+  await openGroup('model-group');
   assert.equal(await page.locator('#solver-readout').isVisible(),true);
+  await page.locator('#model-group > summary').click();
   for(const model of ['schwarzschild','reissner','kerr-newman'])assert.equal(await page.locator(`[data-model="${model}"]`).isDisabled(),true);
   assert.match(await page.locator('#physics-help').textContent(),/模拟数据固定为克尔时空，a=0.9375、Q=0/);
   // Include unrelated valid fields in each rejected patch to prove there are
@@ -155,7 +159,15 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   // Static display adds one PSF texture and two two-attachment accumulation
   // buffers to the eleven physical textures. Wait for all four samples before
   // comparing resource counts across a resize, so transient allocation is valid.
-  await page.emulateMedia({reducedMotion:'reduce'});await configure({scene:'m87',paused:true,density:32000});await page.waitForFunction(()=>{const r=observationTools.get_observation.execute({}).render;return r.diagnosticCurrent&&!r.diagnosticPending&&r.progressiveSamples===r.progressiveTarget&&r.registeredTextures===16;});const textureCount=(await observe()).render.registeredTextures;await page.setViewportSize({width:390,height:844});await page.waitForFunction(()=>{const r=observationTools.get_observation.execute({}).render;return r.diagnosticCurrent&&r.progressiveSamples===r.progressiveTarget;});
+  await page.emulateMedia({reducedMotion:'reduce'});await configure({scene:'m87',paused:true,density:32000});await page.waitForFunction(()=>{const r=observationTools.get_observation.execute({}).render;return r.diagnosticCurrent&&!r.diagnosticPending&&r.progressiveSamples===r.progressiveTarget&&r.registeredTextures===16;});const textureCount=(await observe()).render.registeredTextures,beforeMobileResize=(await observe()).render.composites;
+  await page.setViewportSize({width:390,height:844});
+  // The old viewport can still advertise completed samples while its resize
+  // event is pending. Require the changed backing store and a new composite
+  // before treating fullscreen notifications as duplicates of that resize.
+  await page.waitForFunction(before=>{
+   const r=observationTools.get_observation.execute({}).render,canvas=document.getElementById('cosmos'),bounds=document.getElementById('scene').getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);
+   return innerWidth===390&&innerHeight===844&&canvas.width===Math.round(bounds.width*dpr)&&canvas.height===Math.round(bounds.height*dpr)&&r.composites>before&&r.diagnosticCurrent&&!r.diagnosticPending&&r.progressiveSamples===r.progressiveTarget;
+  },beforeMobileResize);
   // Duplicate fullscreen notifications used to clear a settled canvas via
   // same-value backing-store writes, leaving the new composite cache blank.
   const duplicateResize=await page.evaluate(async()=>{

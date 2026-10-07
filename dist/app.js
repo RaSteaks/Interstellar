@@ -6,6 +6,7 @@
   const shell = document.querySelector("#control-shell");
   const toggle = shell.querySelector("summary");
   const panel = document.querySelector("#controls");
+  const panelHeader = document.getElementById("control-header");
   const status = document.querySelector("#status");
   const physics = globalThis.BlackHolePhysics;
   const astrophysics = globalThis.BlackHoleAstrophysics;
@@ -153,15 +154,22 @@
   }
   function syncPanelLayout() {
     if(!shell.open){
-      scene.style.setProperty("--panel-shift-x","0px");scene.style.setProperty("--panel-shift-y","0px");scene.style.setProperty("--panel-height","0px");
+      scene.style.setProperty("--panel-shift-x","0px");scene.style.setProperty("--panel-shift-y","0px");scene.style.setProperty("--panel-height","0px");scene.style.setProperty("--panel-header-height","0px");
       return;
     }
     // Keep the canvas clearance tied to the rendered panel, including wrapped
     // feedback and safe-area changes, instead of duplicating CSS height guesses.
     const panelBounds=panel.getBoundingClientRect(),sceneBounds=scene.getBoundingClientRect(),compact=(window.innerWidth||sceneBounds.width)<=600;
     scene.style.setProperty("--panel-height",`${Math.max(0,panelBounds.height)}px`);
+    // Short phone sheets retain the header while their body scrolls. Its actual
+    // height, including preset feedback, defines safe focus/scroll clearance.
+    scene.style.setProperty("--panel-header-height",`${Math.max(0,panelHeader?.getBoundingClientRect().height||0)}px`);
     scene.style.setProperty("--panel-shift-x",compact?"0px":`${-Math.min(panelBounds.width,sceneBounds.width)/2}px`);
-    scene.style.setProperty("--panel-shift-y",compact?`${-panelBounds.height/2}px`:"0px");
+    // Center the phone image in the actual strip above the sheet, including its
+    // bottom safe-area gap. Rect fallbacks also support non-layout test hosts.
+    const sceneTop=sceneBounds.top||0,panelTop=Number.isFinite(panelBounds.top)?panelBounds.top:sceneTop+sceneBounds.height-panelBounds.height;
+    const freeHeight=Math.max(0,Math.min(sceneBounds.height,panelTop-sceneTop));
+    scene.style.setProperty("--panel-shift-y",compact?`${(freeHeight-sceneBounds.height)/2}px`:"0px");
   }
   function animate(now) {
     frame=0;
@@ -430,6 +438,9 @@
   });
   document.addEventListener("pointerdown",event=>{if(shell.open&&!shell.contains(event.target))shell.open=false;});
   const fullButton=document.querySelector("#fullscreen");
+  // Only expose full screen when the browser can perform the action. The
+  // remaining native buttons fill the shared action row on unsupported phones.
+  fullButton.hidden=typeof scene.requestFullscreen!=="function"||document.fullscreenEnabled===false;
   fullButton.addEventListener("click",async()=>{
     try {
       if(document.fullscreenElement)await document.exitFullscreen();
@@ -473,5 +484,8 @@
   // Details groups and live messages can change the panel height after the
   // outer toggle; update only the clearance variables when that happens.
   const panelObserver=new ResizeObserver(syncPanelLayout);panelObserver.observe(panel);
+  // Header feedback may grow without changing the already capped sheet height.
+  // Observe that row as well, keeping sticky-header scroll padding up to date.
+  if(panelHeader)panelObserver.observe(panelHeader);
   updateUI(reducedMotion.matches?"已按减少动态效果偏好暂停，可点击播放继续观测。":undefined);resize();
 })();

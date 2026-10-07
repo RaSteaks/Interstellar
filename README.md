@@ -147,6 +147,7 @@ node checks/grmhd-worker.cjs       # 逐帧目标、固定 20 GM/c³ 快照间�
 export PLAYWRIGHT_MODULE=~/node_modules/playwright   # 宿主机上已安装的包目录，含 package.json
 node checks/physical-browser.cjs http://127.0.0.1:8765
 node checks/render-performance.cjs http://127.0.0.1:8765
+node checks/mobile-controls.cjs http://127.0.0.1:8765
 THERMAL_SKIP_PERFORMANCE=1 node checks/thermal-acceptance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 ```
@@ -154,6 +155,8 @@ node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 > **判定口径：** 所有场景的未收敛光线与无效光线必须为 0；GPU 浮点系数与双精度 CPU 对照的相对差 <0.1%；偏振误差 <1e-5，且 GRMHD 场景的偏振度 >0.01；逐变体断言实际光线数与积分档位一致（转换矩阵的 Stokes 光锥约束在 `physical-core.cjs` 中独立验证）。完整数值、截图与复现记录写入被忽略的 `verification/`。
 
 `render-performance.cjs` 运行真实 WebGL 提交检查，覆盖静止零绘制、曝光缓存、有限渐进采样、独立子像素积分的 radiance/Stokes 均值、运动/时间/尺寸失效、历史诊断来源与最新完整计数、GPU计时失效回退/恢复，以及缺少浮点线性过滤扩展时的真实着色器。报告位于 `verification/render-performance/`。科学数值检查仍固定单条像素中心光线；四次静止采样是展示抗锯齿，不代表单次光线积分加速。
+
+`mobile-controls.cjs` 检查320/390/430px触控视口中的关闭按钮与读数分离、原生下拉与触控尺寸、滚动和短窗口操作可达性、关闭重开后的参数保留、减少动态效果、尺寸通知与全屏能力回退。求解详情位于“模型与参考”分组，手机底部只保留操作、当前状态和反馈；不支持原生全屏时隐藏该按钮。报告与截图位于 `verification/mobile-controls/`。浏览器触控模拟不替代真实iPhone Safari设备复核。
 
 2026-10-07的同设备、同2048 r_g域固定预算对照中，曝光合成GPU中位耗时从0.7675ms降到0.126541ms（约83.5%），重复静止帧停止GPU提交；单次追踪耗时没有明确加速结论。完整方法与分项在本地复现产物 `verification/render-performance/fixed-budget/performance-interleaved.json`，与下方历史热盘性能报告分别保存。
 
