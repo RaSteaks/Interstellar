@@ -7,7 +7,8 @@ const path=require('node:path');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const base=process.argv[2]||'http://127.0.0.1:8765';
 const baseline=process.argv[3]||'http://127.0.0.1:8766';
-const output=path.join(__dirname,'../verification/thermal');fs.mkdirSync(output,{recursive:true});
+// Preserve earlier acceptance evidence when validating a new local change.
+const output=process.env.THERMAL_OUTPUT?path.resolve(process.env.THERMAL_OUTPUT):path.join(__dirname,'../verification/thermal');fs.mkdirSync(output,{recursive:true});
 const executable=process.env.CHROME_EXECUTABLE||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const percentile=(items,f)=>[...items].sort((a,b)=>a-b)[Math.min(items.length-1,Math.floor(items.length*f))];
 
@@ -114,7 +115,9 @@ const percentile=(items,f)=>[...items].sort((a,b)=>a-b)[Math.min(items.length-1,
       calls=[];complete();const start=performance.now(),builds=currentEngine.metrics.geodesicBuilds;currentEngine.draw(size,0);complete();
       const endToEndMs=performance.now()-start;
       for(const call of calls)if(call.query){for(let poll=0;poll<100&&!gl.getQueryParameter(call.query,gl.QUERY_RESULT_AVAILABLE);poll++)await new Promise(r=>setTimeout(r,2));if(!gl.getParameter(ext.GPU_DISJOINT_EXT)&&gl.getQueryParameter(call.query,gl.QUERY_RESULT_AVAILABLE)){call.ms=gl.getQueryParameter(call.query,gl.QUERY_RESULT)/1e6;call.source='gpu-query';}gl.deleteQuery(call.query);}
-      if(i>=4)samples[mode].push({endToEndMs,traceMs:currentEngine.metrics.geodesicBuilds>builds?calls[0].ms:0,compositeMs:calls.at(-1).ms,timingSource:calls[0].source,raySamples:currentEngine.metrics.raySamples,quality:currentEngine.metrics.traceQuality,builds:currentEngine.metrics.geodesicBuilds-builds});
+      // Unchanged images now skip every draw; zero is the measured GPU work,
+      // while end-to-end still includes the explicit verification round trip.
+      if(i>=4)samples[mode].push({endToEndMs,traceMs:currentEngine.metrics.geodesicBuilds>builds?calls[0].ms:0,compositeMs:calls.at(-1)?.ms??0,timingSource:calls[0]?.source??'no-gpu-submission',raySamples:currentEngine.metrics.raySamples,quality:currentEngine.metrics.traceQuality,builds:currentEngine.metrics.geodesicBuilds-builds});
       await new Promise(r=>setTimeout(r,10));
      }
     }gl.drawArrays=original;return {samples,metrics:{...currentEngine.metrics},source:'Trace/composite: GPU TIME_ELAPSED queries, CPU completed-readback fallback. End-to-end: CPU performance.now + synchronous 1-pixel GPU readback (includes command-buffer roundtrip)'};

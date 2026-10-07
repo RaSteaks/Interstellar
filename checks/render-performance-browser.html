@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><link rel="icon" href="data:,">
+<title>Renderer cache and progressive GPU regression checks</title>
+<style>body{margin:16px;background:#08090d;color:#ddd;font:14px/1.5 monospace}canvas{width:320px;height:200px}pre{white-space:pre-wrap}</style>
+<canvas id="cosmos" width="320" height="200"></canvas><pre id="report">Running actual WebGL checks…</pre>
+<script src="../dist/relativity.js"></script><script src="../dist/astrophysics.js"></script><script src="../dist/plasma.js"></script><script src="../dist/grmhd-continuation.js"></script><script src="../dist/physical-renderer.js"></script>
+<script>
+// This separate page exercises production shaders and actual GL submissions.
+// Instrumentation is restricted to verification and never enters dist.
+window.runRenderPerformanceChecks=async function(){
+  const canvas=document.getElementById("cosmos"),gl=canvas.getContext("webgl2",{alpha:false,antialias:false,powerPreference:"high-performance"});
+  if(!gl||!gl.getExtension("EXT_color_buffer_float"))throw Error("WebGL2 floating-point render targets are unavailable");
+  const assert=(condition,message)=>{if(!condition)throw Error(message);};
+  const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+  const waitFor=async(predicate,message)=>{const deadline=performance.now()+12000;while(!predicate()){if(performance.now()>deadline)throw Error(message);await sleep(10);}};
+  const calls={draws:[],allocations:0,pboReads:0,cpuReads:0,maxPendingPbos:0},pendingPbos=new Set(),originals=new Map();
+  const report={device:{},checks:[],errors:[]};let engine=null,state=null,frameRequests=0;
+  const debug=gl.getExtension("WEBGL_debug_renderer_info");
+  report.device={renderer:debug?gl.getParameter(debug.UNMASKED_RENDERER_WEBGL):null,timerQueries:!!gl.getExtension("EXT_disjoint_timer_query_webgl2")};
+  const wrap=(name,inspect)=>{const original=gl[name].bind(gl);originals.set(name,original);gl[name]=(...args)=>{inspect(...args);return original(...args);};};
+  wrap("drawArrays",()=>calls.draws.push({defaultFramebuffer:gl.getParameter(gl.FRAMEBUFFER_BINDING)===null}));
+  wrap("texImage2D",()=>calls.allocations++);
+  wrap("readPixels",(...args)=>{
+    const buffer=gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
+    if(buffer&&typeof args[6]==="number"){
+      calls.pboReads++;pendingPbos.add(buffer);calls.maxPendingPbos=Math.max(calls.maxPendingPbos,pendingPbos.size);
+    }
+  });
+  wrap("getBufferSubData",()=>{calls.cpuReads++;pendingPbos.delete(gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING));});
+  wrap("deleteBuffer",buffer=>pendingPbos.delete(buffer));
+  // Delay only completion polling, then release the real GPU fence. This
+  // deterministic backlog checks stale provenance without fabricating success.
+  const realWait=gl.clientWaitSync.bind(gl);let holdFenceCompletions=false;
+  originals.set("clientWaitSync",realWait);gl.clientWaitSync=(...args)=>holdFenceCompletions?gl.TIMEOUT_EXPIRED:realWait(...args);
+  const timerExtension=gl.getExtension("EXT_disjoint_timer_query_webgl2"),realParameter=gl.getParameter.bind(gl);let forceDisjoint=false;
+  // The failure path is injected; successful query durations always come from
+  // the actual GPU. Restore normal driver results to check recovery afterwards.
+  originals.set("getParameter",realParameter);gl.getParameter=parameter=>forceDisjoint&&parameter===timerExtension?.GPU_DISJOINT_EXT?true:realParameter(parameter);
+  const realExtension=gl.getExtension.bind(gl);let disableFloatLinear=false;
+  originals.set("getExtension",realExtension);gl.getExtension=name=>disableFloatLinear&&name==="OES_texture_float_linear"?null:realExtension(name);
+  const clearCalls=()=>{calls.draws=[];calls.allocations=0;calls.pboReads=0;calls.cpuReads=0;calls.maxPendingPbos=pendingPbos.size;};
+  const size=()=>({width:canvas.width,height:canvas.height,scale:canvas.height*.028*state.viewZoom});
+  const draw=()=>engine.draw(size(),0);
+  const snapshot=()=>({...engine.metrics});
+  const create=async(options={},verification={rayBudget:16000,disableTimers:true})=>{
+    engine?.dispose();canvas.width=320;canvas.height=200;frameRequests=0;
+    const scene=options.scene||"quasar",preset=BlackHoleAstrophysics.scenes[scene];
+    state={scene,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:"static",display:"intensity",yaw:0,drift:0,time:0,viewZoom:1,zoom:1,paused:true,interacting:false,density:16000,exposure:1,...options};
+    engine=BlackHolePhysicalRenderer.create({canvas,state,verification,onNeedsFrame(){frameRequests++;},onStatus(){}});
+    assert(engine,"Physical renderer did not initialize");draw();
+    if(preset.flow==="grmhd"){
+      await waitFor(()=>engine.metrics.dataStatus!=="loading","GRMHD data did not finish loading");
+      assert(engine.metrics.dataStatus==="ready","GRMHD data failed to load");engine.refine();draw();
+    }
+    return engine;
+  };
+  const settle=()=>{
+    for(let i=0;i<12&&engine.metrics.progressiveSamples<engine.metrics.progressiveTarget;i++)draw();
+    assert(engine.metrics.progressiveSamples===engine.metrics.progressiveTarget,"Progressive sampling failed to reach its finite target");
+  };
+  const equalBuffer=(actual,expected,label)=>{
+    assert(actual.length===expected.length,label+" dimensions changed");
+    for(let i=0;i<actual.length;i++)assert(actual[i]===expected[i],label+" changed at component "+i);
+  };
+  const validate=image=>{
+    let light=0,polarized=0,unfinished=0,invalid=0,maxConeError=0;
+    for(let i=0;i<image.radiance.length;i+=4){
+      for(let k=0;k<4;k++)assert(Number.isFinite(image.radiance[i+k])&&Number.isFinite(image.stokes[i+k]),"Nonfinite physical buffer");
+      light+=image.radiance[i]+image.radiance[i+1]+image.radiance[i+2];
+      const p=Math.hypot(image.stokes[i+1],image.stokes[i+2],image.stokes[i+3]);polarized=Math.max(polarized,p);
+      maxConeError=Math.max(maxConeError,p-image.stokes[i]);
+      if(image.diagnostic[i]===0)unfinished++;if(image.diagnostic[i]===4)invalid++;
+      assert([0,1,2,3,4].includes(image.diagnostic[i]),"Diagnostic status was averaged instead of remaining categorical");
+    }
+    assert(light>0,"Rendered image contains no light");assert(unfinished===0&&invalid===0,"Physical integration has unfinished or invalid rays");
+    assert(maxConeError<1e-5,"Averaged Stokes vector left the physical light cone");
+    return {light,polarized,unfinished,invalid,maxConeError};
+  };
+  try{
+    await create();const before=snapshot(),raw=engine.readback();validate(raw);clearCalls();
+    for(let i=0;i<5;i++)draw();
+    assert(calls.draws.length===0,"Unchanged scene submitted GPU draws");assert(calls.allocations===0,"Unchanged scene rebuilt textures");
+    assert(engine.metrics.geodesicBuilds===before.geodesicBuilds,"Unchanged scene retraced rays");
+    state.exposure=1.7;clearCalls();draw();
+    assert(calls.draws.length===1&&calls.draws[0].defaultFramebuffer,"Exposure did not use exactly one display composite");
+    assert(engine.metrics.geodesicBuilds===before.geodesicBuilds,"Exposure retraced the physical scene");
+    assert(engine.metrics.glowBuilds===before.glowBuilds,"Exposure recomputed the cached glow");
+    const exposed=engine.readback();equalBuffer(exposed.radiance,raw.radiance,"Exposure radiance");equalBuffer(exposed.stokes,raw.stokes,"Exposure Stokes");
+    state.yaw=.04;clearCalls();draw();
+    assert(engine.metrics.geodesicBuilds>before.geodesicBuilds,"Camera change did not retrace rays");
+    assert(engine.metrics.glowBuilds>before.glowBuilds,"Camera change did not refresh cached glow");
+    report.checks.push({name:"unchanged scene stops GPU work; exposure only composites; camera invalidates trace/glow",before,after:snapshot()});
+
+    await create({}, {rayBudget:16000,disableTimers:true,forceProgressive:true,progressiveSamples:4});settle();
+    assert(engine.metrics.progressiveSamples===4,"Static scene did not accumulate four subpixel samples");
+    const accumulated=engine.readback({display:true}),completed=snapshot();validate(accumulated);clearCalls();
+    for(let i=0;i<5;i++)draw();assert(calls.draws.length===0,"Completed progressive image kept submitting GPU draws");
+    state.exposure=1.8;draw();
+    assert(engine.metrics.progressiveSamples===4,"Exposure reset completed progressive sampling");
+    assert(engine.metrics.geodesicBuilds===completed.geodesicBuilds&&engine.metrics.glowBuilds===completed.glowBuilds,"Exposure rebuilt progressive trace/glow");
+    const accumulatedExposure=engine.readback({display:true});equalBuffer(accumulatedExposure.radiance,accumulated.radiance,"Accumulated exposure radiance");equalBuffer(accumulatedExposure.stokes,accumulated.stokes,"Accumulated exposure Stokes");
+    state.yaw=.04;draw();assert(engine.metrics.progressiveSamples===1,"Camera change retained samples from the previous observer");
+    settle();state.interacting=true;state.yaw=.08;draw();assert(engine.metrics.progressiveSamples<=1,"Moving camera accumulated stale samples");
+    for(let i=0;i<3;i++){state.yaw+=.02;draw();assert(engine.metrics.progressiveSamples<=1,"Successive camera events were averaged together");}
+    state.interacting=false;draw();settle();
+    const oldWidth=engine.metrics.traceWidth;canvas.width=400;draw();
+    assert(engine.metrics.traceWidth!==oldWidth,"Output resize did not rebuild the trace dimensions");
+    assert(engine.metrics.progressiveSamples===1,"Resize retained accumulation from a different pixel grid");
+    report.checks.push({name:"progressive sampling has finite completion, exposure reuse, camera/motion/resize reset",completed,after:snapshot(),frameRequests});
+
+    // The reference is an arithmetic mean of independent physical integrations,
+    // not a copy of the accumulation shader. Nonzero GRMHD Q/U/V catches errors
+    // that scalar intensity alone would leave undetected.
+    const jitter=[[-.25,-.25],[.25,-.25],[-.25,.25],[.25,.25]],references=[];
+    for(const sampleJitter of jitter){
+      await create({scene:"m87",display:"linear"},{rayBudget:16000,disableTimers:true,sampleJitter});references.push(engine.readback());
+    }
+    await create({scene:"m87",display:"linear"},{rayBudget:16000,disableTimers:true,forceProgressive:true,progressiveSamples:4});settle();
+    const averaged=engine.readback({display:true}),latest=engine.readback(),physical=validate(averaged);assert(physical.polarized>0,"Stokes accumulation oracle has no polarized light");
+    const meanError={radiance:0,stokes:0};
+    for(const channel of ["radiance","stokes"]){
+      let maximum=0,absolute=0;
+      for(let i=0;i<averaged[channel].length;i++){
+        const expected=references.reduce((sum,image)=>sum+image[channel][i],0)/jitter.length;
+        maximum=Math.max(maximum,Math.abs(expected));absolute=Math.max(absolute,Math.abs(averaged[channel][i]-expected));
+      }
+      meanError[channel]=absolute/Math.max(1e-12,maximum);assert(meanError[channel]<2e-5,channel+" accumulation disagrees with independent jitter integrations: "+meanError[channel]);
+    }
+    equalBuffer(averaged.diagnostic,latest.diagnostic,"Displayed diagnostic");
+    equalBuffer(latest.radiance,references[3].radiance,"Raw latest-sample radiance");equalBuffer(latest.stokes,references[3].stokes,"Raw latest-sample Stokes");
+    report.checks.push({name:"independent jitter mean preserves linear radiance, residual transmission, Stokes and categorical diagnostics",meanError,physical,metrics:snapshot()});
+
+    await create({scene:"hotspot"},{rayBudget:16000,disableTimers:true,forceProgressive:true,progressiveSamples:4});settle();
+    state.time=4;draw();assert(engine.metrics.progressiveSamples===1,"A new retarded observation event reused old temporal samples");
+    state.paused=false;for(let i=0;i<3;i++){state.time+=.1;draw();assert(engine.metrics.progressiveSamples<=1,"Running dynamic scene accumulated different observation times");}
+    state.paused=true;draw();settle();
+    report.checks.push({name:"hotspot observation time invalidates accumulation; playback samples remain independent",metrics:snapshot()});
+
+    // Production asynchronous diagnostics must converge to the settled latest
+    // trace. Tracking real PBO buffers checks bounded in-flight work, while a
+    // synchronous oracle independently checks the returned exact counts.
+    holdFenceCompletions=true;await create({paused:false,interacting:true},{rayBudget:16000});clearCalls();
+    const readbacksBefore=engine.metrics.diagnosticReadbacks;
+    for(let i=0;i<8;i++){state.yaw+=.03;draw();}
+    const burstPboReads=calls.pboReads;assert(calls.maxPendingPbos<=1,"More than one diagnostic PBO remained in flight");
+    assert(burstPboReads<8,"Every moving trace queued a full diagnostic transfer");
+    holdFenceCompletions=false;
+    await waitFor(()=>{state.yaw+=.003;draw();return engine.metrics.diagnosticVersion<engine.metrics.renderVersion&&engine.metrics.diagnosticCurrent===false;},"A delayed moving diagnostic lost its original version instead of publishing stale provenance");
+    const staleCompletion={version:engine.metrics.diagnosticVersion,renderVersion:engine.metrics.renderVersion,frame:engine.metrics.diagnosticFrame,time:engine.metrics.diagnosticTime,current:engine.metrics.diagnosticCurrent};
+    state.interacting=false;state.paused=true;draw();const settledVersion=engine.metrics.renderVersion;
+    await waitFor(()=>{draw();return engine.metrics.diagnosticCurrent&&!engine.metrics.diagnosticPending;},"Latest settled diagnostics did not complete");
+    const asynchronous={version:engine.metrics.diagnosticVersion,unfinished:engine.metrics.unfinishedRays,invalid:engine.metrics.invalidRays};
+    assert(asynchronous.version===settledVersion,"Diagnostic completion belongs to an obsolete trace");
+    const oracle=validate(engine.readback());assert(asynchronous.unfinished===oracle.unfinished&&asynchronous.invalid===oracle.invalid,"Asynchronous diagnostic counts disagree with the exact buffer");
+    assert(calls.maxPendingPbos<=1,"Settled diagnostics exceeded the in-flight PBO limit");
+    report.checks.push({name:"diagnostics throttle moving readback, retain stale provenance and settle to latest exact counts",burstPboReads,maxPendingPbos:calls.maxPendingPbos,readbacksBefore,readbacksAfter:engine.metrics.diagnosticReadbacks,staleCompletion,asynchronous,oracle});
+
+    // Observe the production controller with real completed GPU queries. No
+    // elapsed-time threshold is asserted: GPU load and clocks vary by host.
+    // A fixed viewport and requested density must map each discrete budget
+    // level to stable dimensions, rather than continually reallocating them.
+    await create({paused:false,interacting:true,density:64000},{});clearCalls();
+    const budgetSamples=[],dimensionsByLevel=new Map();
+    for(let i=0;i<24;i++){
+      state.yaw+=.025;draw();await sleep(15);
+      const m=engine.metrics,dimensions=[m.traceWidth,m.traceHeight];
+      assert(Number.isInteger(m.budgetLevel)&&m.budgetLevel>=0,"Adaptive budget is not a discrete level");
+      assert(m.raySamples===dimensions[0]*dimensions[1]&&m.raySamples<=64000,"Adaptive budget exceeded the requested ray cap");
+      const previous=dimensionsByLevel.get(m.budgetLevel);
+      if(previous)assert(previous[0]===dimensions[0]&&previous[1]===dimensions[1],"One discrete budget level produced unstable texture dimensions");
+      dimensionsByLevel.set(m.budgetLevel,dimensions);
+      budgetSamples.push({level:m.budgetLevel,source:m.budgetTimingSource,rays:m.raySamples,dimensions,traceMs:m.traceMs,frameMs:m.frameMs});
+    }
+    if(report.device.timerQueries)await waitFor(()=>{draw();return engine.metrics.budgetTimingSource==="gpu-query";},"Supported GPU timer never became the adaptive budget source");
+    const calibrationSource=engine.metrics.budgetTimingSource;let disjointSource=null,recoveredSource=null;
+    if(report.device.timerQueries){
+      forceDisjoint=true;state.yaw+=.025;draw();
+      await waitFor(()=>{draw();return engine.metrics.budgetTimingSource==="frame-wall";},"GPU disjoint did not invalidate the calibrated controller estimate");
+      disjointSource=engine.metrics.budgetTimingSource;forceDisjoint=false;state.yaw+=.025;draw();
+      await waitFor(()=>{draw();return engine.metrics.budgetTimingSource==="gpu-query";},"Real GPU timing did not recover after disjoint ended");
+      recoveredSource=engine.metrics.budgetTimingSource;
+    }
+    report.checks.push({name:"production adaptive budget uses real GPU timings, stable discrete dimensions and disjoint fallback/recovery",samples:budgetSamples,calibrationSource,disjointSource,recoveredSource,finalSource:engine.metrics.budgetTimingSource,textureAllocations:calls.allocations,levels:dimensionsByLevel.size});
+
+    // Hiding only float-linear support compiles and runs the real manual
+    // filtering shaders, keeping actual framebuffer rendering and integration.
+    disableFloatLinear=true;await create();const manuallyFiltered=validate(engine.readback());clearCalls();draw();
+    assert(calls.draws.length===0,"Manual filtering path bypassed unchanged-scene caching");
+    state.exposure=1.3;draw();assert(calls.draws.length===1&&calls.draws[0].defaultFramebuffer,"Manual filtering exposure rebuilt physical/glow buffers");
+    const displayPixels=new Uint8Array(canvas.width*canvas.height*4);gl.readPixels(0,0,canvas.width,canvas.height,gl.RGBA,gl.UNSIGNED_BYTE,displayPixels);
+    let visibleLight=0;for(let i=0;i<displayPixels.length;i+=4)visibleLight+=displayPixels[i]+displayPixels[i+1]+displayPixels[i+2];
+    assert(visibleLight>0,"Manual-filtered display produced an empty image");
+    report.checks.push({name:"missing float-linear extension compiles manual filters, renders finite physical/display light and preserves cache",physical:manuallyFiltered,visibleLight,metrics:snapshot()});
+    disableFloatLinear=false;
+    assert(gl.getError()===gl.NO_ERROR,"Renderer verification produced a WebGL error");
+    report.pass=true;return report;
+  }finally{
+    engine?.dispose();for(const [name,original] of originals)gl[name]=original;
+  }
+};
+window.runRenderPerformanceChecks().then(result=>{window.result=result;document.getElementById("report").textContent=JSON.stringify(result,null,2);}).catch(error=>{window.result={pass:false,error:String(error),stack:error.stack};document.getElementById("report").textContent=JSON.stringify(window.result,null,2);});
+</script>
+</html>

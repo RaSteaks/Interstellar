@@ -29,6 +29,7 @@
 | --- | --- |
 | 🌌 **实时光线积分** | 入向／外向双 Kerr–Schild 坐标图，Bogacki–Shampine 3(2) 嵌入步进（FSAL 复用接受终点），未收敛与无效光线显式区分。 |
 | 🔥 **物理辐射传输** | 热同步辐射、吸收、法拉第旋转与转换、四分量 Stokes 矩阵指数；纯强度热盘另走独立标量核，不构建偏振基底。 |
+| 🖼️ **按需显示与静止细化** | 画面无变化时停止合成，曝光复用辐射与光晕缓存；交互预算由有效 GPU 计时控制，暂停后最多四次对称子像素采样改善细节。每次采样保持原精细分辨率，完整细化的总光线数为单次的四倍。 |
 | 🛰️ **类时观察者** | E=1、L=0 的自由落体世界线，按固有时间推进，含运动像差与频移；也可选视界外静止观察者。 |
 | 🎬 **10 个场景预设** | 光学热盘、射电热流、喷流、逆行盘、带电黑洞与规定轨道热点，完整列表见[场景预设](#scenes)表。 |
 | 🧾 **本地生成的 GRMHD 片段** | 由固定提交的 Illinois iharm2d_v3 产出；站点只分发数值记录与来源说明，不含上游求解器源码。 |
@@ -140,16 +141,21 @@ node checks/grmhd-worker.cjs       # 逐帧目标、固定 20 GM/c³ 快照间�
 真实 GPU 的浏览器检查需要两项本机资源，都不写入项目依赖：
 
 1. **Playwright 与本机 Chrome**：用环境变量 `PLAYWRIGHT_MODULE` 指向宿主机上已安装的 playwright 包目录，`CHROME_EXECUTABLE` 指向本机 Chrome 可执行文件。
-2. **两个本地静态服务**：端口 8765 服务当前 `dist/`；端口 8766 服务 `verification/thermal/baseline/`，即此前运行保存的原始快照（该目录已被 `.gitignore` 忽略）。
+2. **本地静态服务**：端口 8765 服务仓库根目录（用户页面为 `/dist/`，检查页面为 `/checks/`）。固定预算对照另需端口 8766 服务 `verification/thermal/baseline/`，即此前运行保存的原始快照（该目录已被 `.gitignore` 忽略）；独立回归检查不需要基线服务。
 
 ```bash
 export PLAYWRIGHT_MODULE=~/node_modules/playwright   # 宿主机上已安装的包目录，含 package.json
 node checks/physical-browser.cjs http://127.0.0.1:8765
+node checks/render-performance.cjs http://127.0.0.1:8765
 THERMAL_SKIP_PERFORMANCE=1 node checks/thermal-acceptance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 ```
 
 > **判定口径：** 所有场景的未收敛光线与无效光线必须为 0；GPU 浮点系数与双精度 CPU 对照的相对差 <0.1%；偏振误差 <1e-5，且 GRMHD 场景的偏振度 >0.01；逐变体断言实际光线数与积分档位一致（转换矩阵的 Stokes 光锥约束在 `physical-core.cjs` 中独立验证）。完整数值、截图与复现记录写入被忽略的 `verification/`。
+
+`render-performance.cjs` 运行真实 WebGL 提交检查，覆盖静止零绘制、曝光缓存、有限渐进采样、独立子像素积分的 radiance/Stokes 均值、运动/时间/尺寸失效、历史诊断来源与最新完整计数、GPU计时失效回退/恢复，以及缺少浮点线性过滤扩展时的真实着色器。报告位于 `verification/render-performance/`。科学数值检查仍固定单条像素中心光线；四次静止采样是展示抗锯齿，不代表单次光线积分加速。
+
+2026-10-07的同设备、同2048 r_g域固定预算对照中，曝光合成GPU中位耗时从0.7675ms降到0.126541ms（约83.5%），重复静止帧停止GPU提交；单次追踪耗时没有明确加速结论。完整方法与分项在本地复现产物 `verification/render-performance/fixed-budget/performance-interleaved.json`，与下方历史热盘性能报告分别保存。
 
 <a id="grmhd"></a>
 

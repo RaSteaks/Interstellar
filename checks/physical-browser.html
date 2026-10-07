@@ -12,7 +12,9 @@ window.runPhysicalCase=async function(options={}){
  const canvas=document.getElementById("cosmos");window.currentEngine?.dispose();
  // Explicit renderer verification options never enter the product configuration
  // validator: they fix budgets/domain/spectra for independent numerical oracles.
- const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:options.verification,onNeedsFrame(){},onStatus(message){document.getElementById("report").textContent=message;}});window.currentEngine=engine;window.caseState=state;
+ // A numerical case samples pixel centers once. Progressive display averaging
+ // has its own independent GPU checks and must not move this oracle's rays.
+ const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:options.verification||{progressiveSamples:1},onNeedsFrame(){},onStatus(message){document.getElementById("report").textContent=message;}});window.currentEngine=engine;window.caseState=state;
  engine.draw({width:640,height:400,scale:400*.028*state.viewZoom},0);
  if(preset.flow==="grmhd"){for(let i=0;i<100&&engine.metrics.dataStatus==="loading";i++)await new Promise(r=>setTimeout(r,100));engine.refine();engine.draw({width:640,height:400,scale:400*.028*state.viewZoom},0);}
  const image=engine.readback();let light=0,maximum=0,polarizationError=0,finite=true,captured=0,escaped=0,opaque=0;

@@ -146,7 +146,9 @@
     // Preserve native 2x Retina detail instead of asking the browser to enlarge a 1.5x canvas.
     const bounds=scene.getBoundingClientRect(),dpr=Math.min(window.devicePixelRatio||1,2);
     size={width:Math.round(bounds.width*dpr),height:Math.round(bounds.height*dpr),dpr,scale:Math.min(bounds.width,bounds.height)*dpr*.028*state.viewZoom};
-    activeCanvas().width=size.width;activeCanvas().height=size.height;requestRender();
+    // Assigning even the same canvas dimensions clears its drawing buffer.
+    // Duplicate resize/fullscreen notifications must preserve the cached image.
+    const surface=activeCanvas();if(surface.width!==size.width)surface.width=size.width;if(surface.height!==size.height)surface.height=size.height;requestRender();
     syncPanelLayout();
   }
   function syncPanelLayout() {
@@ -217,7 +219,7 @@
     else if(movie&&renderer.metrics?.continuationStatus==="failed"){flightStatus.hidden=false;flightStatus.textContent="持续求解已停止 · 保留最后有效画面";}
     else if(movie&&state.waitingForData){flightStatus.hidden=false;flightStatus.textContent=`等待热流数据 · 最新完整状态 t=${(renderer.metrics?.latestSimulationTime??availableTime).toFixed(0)}`;}
     else flightStatus.hidden=flightStage!=="approach"&&flightStage!=="inside";
-    document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}`;
+    updateSampleReadout();
     updateSolverReadout(movie,renderer.metrics);
     if(movie&&renderer.metrics?.movieEnded&&!state.paused){
       // Keep the terminal fallback finite: no future continuation means no
@@ -252,8 +254,17 @@
   }
   function updateTimingReadout() {
     const metrics=renderer.metrics,source=metrics?.timingSource;
-    const label={"gpu-query":"GPU 查询","gpu-query-pending":"等待 GPU 查询","cpu-submission":"CPU 提交耗时（GPU 计时不可用）",mixed:"混合（GPU 查询与 CPU 提交）"}[source]||"等待首帧计时";
-    document.querySelector("#timing-source").textContent=renderer.physical?`计时来源：${label}`:"计时来源：Canvas 投影";
+    const label={"gpu-query":"GPU 查询","gpu-query-pending":"等待 GPU 查询","cpu-submission":"CPU 提交耗时（GPU 计时不可用）","cpu-submission-disjoint":"CPU 提交耗时（GPU 查询失效）",mixed:"混合（GPU 查询与 CPU 提交）"}[source]||"等待首帧计时";
+    // Throttled diagnostics retain their original version; stale counts must
+    // not look like a completed health check for the current observation.
+    const diagnostic=metrics?.diagnosticCurrent===false?" · 诊断待更新":"";
+    document.querySelector("#timing-source").textContent=renderer.physical?`计时来源：${label}${diagnostic}`:"计时来源：Canvas 投影";
+  }
+  function updateSampleReadout() {
+    const metrics=renderer.metrics,progress=renderer.physical&&metrics?.progressiveTarget>1?` · ${metrics.progressiveSamples}/${metrics.progressiveTarget} 次细化`:"";
+    // Count stays the actual per-pass ray pixels. Separate progress reports the
+    // finite display sampling work without inflating the configured ray budget.
+    document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}${progress}`;
   }
   function updateSolverReadout(recorded,metrics={}) {
     const readout=document.querySelector("#solver-readout");readout.hidden=!recorded;if(!recorded)return;
@@ -271,7 +282,7 @@
   }
   function snapshot() {
     const model=renderer.physical?astrophysics.model(state):physics.model(state);
-    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,falling:state.falling,waitingForData:state.waitingForData,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,latestSimulationTime:renderer.metrics?.latestSimulationTime??null,observationTime:renderer.metrics?.observationTime??null,solverStepRate:renderer.metrics?.solverStepRate??0,solverDiagnostics:renderer.metrics?.solverDiagnostics??null,historyMissing:Boolean(renderer.metrics?.historyMissing),timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
+    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,falling:state.falling,waitingForData:state.waitingForData,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count(),passes:renderer.metrics?.progressiveSamples??1,targetPasses:renderer.metrics?.progressiveTarget??1,total:renderer.metrics?.progressiveRaySamples??renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,latestSimulationTime:renderer.metrics?.latestSimulationTime??null,observationTime:renderer.metrics?.observationTime??null,solverStepRate:renderer.metrics?.solverStepRate??0,solverDiagnostics:renderer.metrics?.solverDiagnostics??null,historyMissing:Boolean(renderer.metrics?.historyMissing),timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
   }
   function updateUI(message) {
     const model=renderer.physical?astrophysics.model(state):physics.model(state);
@@ -319,7 +330,7 @@
     document.querySelector("#pause").setAttribute("aria-pressed",String(state.paused));
     document.querySelector("#pause-label").textContent=state.paused?"播放":"暂停";
     document.querySelector("#pause-icon").setAttribute("d",state.paused?"M6 4l9 6-9 6Z":"M7 4v12M13 4v12");
-    document.querySelector("#particle-count").textContent=`${renderer.count().toLocaleString("zh-CN")} ${renderer.physical?"光线":"PT"}`;
+    updateSampleReadout();
     document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容示意":state.paused?"画面已暂停":"相对论辐射成像";
     const fallButton=document.querySelector("#fall");fallButton.disabled=!renderer.physical||state.reducedMotion;fallButton.setAttribute("aria-pressed",String(state.falling));fallButton.textContent=state.falling?"停止自由落体旅程":"开始自由落体旅程";
     updateSolverReadout(recorded,renderer.metrics);if(message)status.textContent=message;

@@ -11,6 +11,10 @@
     // the ambient motion stays continuous at a few retraces per second instead of
     // one retrace per frame. See driftStep in render().
     const DRIFT_RETRACE_PIXELS=12;
+    // Discrete sampling levels avoid reallocating float targets for every small
+    // timing fluctuation. GPU work, rather than monitor refresh, owns the budget.
+    const BUDGET_SCALES=[.125,.1875,.25,.375,.5,.625,.75,1],DIAGNOSTIC_INTERVAL=250;
+    const STATIC_JITTER=[[-.25,-.25],[.25,-.25],[-.25,.25],[.25,.25]];
     // Keep the CPU packing, RGBA32F byte accounting and shader frame budget in
     // lockstep; a solver record is 12 interleaved values per 64×64 cell.
     const MAX_FLUID_FRAMES=169,MAX_DYNAMIC_SLOTS=128,HISTORY_WIDTH=64,HISTORY_CELLS=HISTORY_WIDTH*HISTORY_WIDTH,RECORD_COMPONENTS=12,RGBA_COMPONENTS=4;
@@ -23,7 +27,7 @@
       precision highp float;precision highp int;precision highp sampler2DArray;
       in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;layout(location=2) out vec4 diagnostic;
       uniform vec3 uOrigin;uniform vec4 uObserver,uRight,uUp,uForward;
-      uniform vec2 uExtent,uConstants;uniform float uDistance,uSpin,uCharge,uHorizon,uIsco,uInner,uOuter,uTime,uRg,uDensityUnit,uSpectrumReference,uTolerance,uChart,uRadialSpeed,uElectronRatio,uMediumStep,uDiskCount,uSkyRadius,uEmissionScale,uDiskSplit,uFarStep,uInitialStep;
+      uniform vec2 uExtent,uConstants,uJitter;uniform float uDistance,uSpin,uCharge,uHorizon,uIsco,uInner,uOuter,uTime,uRg,uDensityUnit,uSpectrumReference,uTolerance,uChart,uRadialSpeed,uElectronRatio,uMediumStep,uDiskCount,uSkyRadius,uEmissionScale,uDiskSplit,uFarStep,uInitialStep;
       uniform int uFlow,uBand,uPolarization,uMaxSteps,uFrameCount,uHotspot,uSkyEnabled;
       uniform sampler2D uDisk,uSpectrum,uBessel,uTheta;
       uniform sampler2DArray uFluid,uVelocity,uMagnetic;
@@ -286,7 +290,7 @@
       #endif
       void main(){
         rayChart=uChart;
-        vec2 impact=(vUv-.5)*uExtent;vec3 direction=normalize(vec3(impact/uDistance,1.));
+        vec2 impact=(vUv+uJitter-.5)*uExtent;vec3 direction=normalize(vec3(impact/uDistance,1.));
         vec4 spatial=direction.x*uRight+direction.y*uUp+direction.z*uForward;
         vec4 k=-uObserver+spatial;Geometry initial=metric(uOrigin,uSpin,uCharge);vec4 initialP=lower4(k,initial);
         #ifndef THERMAL_SCALAR
@@ -412,26 +416,55 @@
         radiance=vec4(max(total,vec3(0.)),residual);stokes=totalStokes;diagnostic=vec4(float(status),float(accepted),maxError,status==0?metric(x,uSpin,uCharge).r:depth);
       }
     `;
+    // The optical PSF is a display cache, independent of physical radiance and
+    // exposure. Manual filtering keeps unsupported float-linear devices smooth.
+    const filter=`
+      vec4 filtered(sampler2D tex,vec2 uv){
+        #ifdef MANUAL_IMAGE_FILTER
+        ivec2 last=textureSize(tex,0)-1;vec2 p=uv*vec2(last+1)-.5,f=fract(p);ivec2 a=ivec2(floor(p));
+        return mix(mix(texelFetch(tex,clamp(a,ivec2(0),last),0),texelFetch(tex,clamp(a+ivec2(1,0),ivec2(0),last),0),f.x),mix(texelFetch(tex,clamp(a+ivec2(0,1),ivec2(0),last),0),texelFetch(tex,clamp(a+ivec2(1),ivec2(0),last),0),f.x),f.y);
+        #else
+        return texture(tex,uv);
+        #endif
+      }
+    `;
+    const glow=`#version 300 es
+      precision highp float;in vec2 vUv;out vec4 color;uniform sampler2D uImage;uniform vec2 uPixel;
+      ${filter}
+      void main(){
+        vec3 bloom=vec3(0.);
+        for(int i=0;i<8;i++){float a=float(i)*.7853981634;vec2 o=vec2(cos(a),sin(a));bloom+=max(filtered(uImage,vUv+uPixel*o*6.).rgb-.8,0.)*.013+max(filtered(uImage,vUv+uPixel*o*18.).rgb-1.5,0.)*.005;}
+        color=vec4(bloom,1.);
+      }
+    `;
+    const accumulate=`#version 300 es
+      precision highp float;in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;
+      uniform sampler2D uImage,uStokes,uPreviousImage,uPreviousStokes;uniform float uWeight;
+      void main(){
+        ivec2 pixel=ivec2(gl_FragCoord.xy);
+        radiance=texelFetch(uImage,pixel,0);stokes=texelFetch(uStokes,pixel,0);
+        if(uWeight<1.){radiance=mix(texelFetch(uPreviousImage,pixel,0),radiance,uWeight);stokes=mix(texelFetch(uPreviousStokes,pixel,0),stokes,uWeight);}
+      }
+    `;
     const display=`#version 300 es
       precision highp float;in vec2 vUv;out vec4 color;
-      uniform sampler2D uImage,uStokes,uDiagnostic;uniform vec2 uPixel,uOutput;uniform float uExposure;uniform int uBand,uDisplay;
+      uniform sampler2D uImage,uStokes,uDiagnostic,uGlow;uniform vec2 uOutput;uniform float uExposure;uniform int uBand,uDisplay;
+      ${filter}
       vec3 tone(vec3 c){c=max(c,vec3(0.));return clamp((c*(2.51*c+.03))/(c*(2.43*c+.59)+.14),0.,1.);}
       vec3 falseColor(float value){float t=clamp(value,0.,1.);return mix(mix(vec3(0.),vec3(.72,.045,.004),smoothstep(0.,.48,t)),mix(vec3(1.,.46,.025),vec3(1.,.97,.82),smoothstep(.68,1.,t)),smoothstep(.3,.85,t));}
       void main(){
-        vec3 light=texture(uImage,vUv).rgb,bloom=vec3(0.);
-        // uPixel is one output pixel, so the glow keeps its screen size when the
-        // trace resolution changes with the sampling budget.
-        for(int i=0;i<8;i++){float a=float(i)*.7853981634;vec2 o=vec2(cos(a),sin(a));bloom+=max(texture(uImage,vUv+uPixel*o*6.).rgb-.8,0.)*.013+max(texture(uImage,vUv+uPixel*o*18.).rgb-1.5,0.)*.005;}
+        vec3 light=filtered(uImage,vUv).rgb,bloom=filtered(uGlow,vUv).rgb;
         vec3 rgb=tone((light+bloom)*uExposure);
         if(uBand!=0)rgb=falseColor(rgb.r);
         if(uDisplay==1){
-          vec2 cell=floor(gl_FragCoord.xy/24.),center=(cell+.5)*24.;vec4 s=texture(uStokes,center/uOutput);
+          vec2 cell=floor(gl_FragCoord.xy/24.),center=(cell+.5)*24.;vec4 s=filtered(uStokes,center/uOutput);
           float degree=length(s.yz)/max(1e-12,s.x),angle=.5*atan(s.z,s.y);
           vec2 d=gl_FragCoord.xy-center,axis=vec2(cos(angle),sin(angle));
           float mark=(1.-smoothstep(.6,1.25,abs(dot(d,vec2(-axis.y,axis.x)))))*(1.-smoothstep(2.+6.*degree,3.+6.*degree,abs(dot(d,axis))));
           mark*=smoothstep(.008,.04,s.x*uExposure)*smoothstep(.01,.05,degree);rgb=mix(rgb,vec3(.92,.97,1.),mark*.85);
-        } else if(uDisplay==2){vec4 s=texture(uStokes,vUv);float v=s.w/max(1e-12,s.x),strength=clamp(abs(v)*20.,0.,1.);rgb=mix(vec3(.12,.15,.18),v>0.?vec3(1.,.46,.12):vec3(.13,.65,.9),strength)*tone(vec3(s.x*uExposure)).r;}
-        else if(uDisplay==3){vec4 d=texture(uDiagnostic,vUv);rgb=d.x==0.?vec3(1.,.1,.8):d.x==4.?vec3(1.,0.,0.):vec3(d.y/600.,d.z*500.,.08);}
+        } else if(uDisplay==2){vec4 s=filtered(uStokes,vUv);float v=s.w/max(1e-12,s.x),strength=clamp(abs(v)*20.,0.,1.);rgb=mix(vec3(.12,.15,.18),v>0.?vec3(1.,.46,.12):vec3(.13,.65,.9),strength)*tone(vec3(s.x*uExposure)).r;}
+        // Categorical diagnostics must never blend a failed ray into its neighbor.
+        else if(uDisplay==3){ivec2 dimensions=textureSize(uDiagnostic,0);vec4 d=texelFetch(uDiagnostic,min(ivec2(vUv*vec2(dimensions)),dimensions-1),0);rgb=d.x==0.?vec3(1.,.1,.8):d.x==4.?vec3(1.,0.,0.):vec3(d.y/600.,d.z*500.,.08);}
         color=vec4(pow(max(rgb,vec3(0.)),vec3(1./2.2)),1.);
       }
     `;
@@ -447,7 +480,8 @@
     // A test-only unseeded variant recomputes the same first derivative each
     // step, allowing scientific comparisons without adding a runtime GPU branch.
     const integratedFragment=verification.forceUnseededBS?fragment.replace("stepBSSeeded(x,p,time,energy,uSpin,uCharge,h,rayDx,rayDp,nx,np,nt,error,m,rayDx,rayDp);","stepBS(x,p,time,energy,uSpin,uCharge,h,nx,np,nt,error);seedBS(nx,np,energy,uSpin,uCharge,m,rayDx,rayDp);"):fragment;
-    const sampledFragment=floatLinear?integratedFragment:integratedFragment.replace("#version 300 es","#version 300 es\n#define DISK_MANUAL_INTERPOLATION"),traceProgram=program(vertex,sampledFragment),scalarProgram=program(vertex,sampledFragment.replace("#version 300 es","#version 300 es\n#define THERMAL_SCALAR")),displayProgram=program(vertex,display);
+    const filteredFragment=source=>floatLinear?source:source.replace("#version 300 es","#version 300 es\n#define MANUAL_IMAGE_FILTER");
+    const sampledFragment=floatLinear?integratedFragment:integratedFragment.replace("#version 300 es","#version 300 es\n#define DISK_MANUAL_INTERPOLATION"),traceProgram=program(vertex,sampledFragment),scalarProgram=program(vertex,sampledFragment.replace("#version 300 es","#version 300 es\n#define THERMAL_SCALAR")),displayProgram=program(vertex,filteredFragment(display)),glowProgram=program(vertex,filteredFragment(glow)),accumulateProgram=program(vertex,accumulate);
     const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);resources.push(()=>gl.deleteBuffer(quad));
     gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
     const textures=new Set();
@@ -459,6 +493,14 @@
     let fluidTextures=[empty,empty,empty],simulation=null,continuation=null,historyFrameCount=0,fluidLayerCount=1,dynamicFrames=new Map(),fluidFrameCache=null,fluidFrameCacheDirty=true,loading=null,disposed=false,target=null,profile=null,profileKey="",geometryKey="",lastTime=-1,refined=false,refinementDue=false,timer=0,ema=25,frameCounter=0,lastWall=null,budgetScale=1,lastInteractive=false,lastActive=false,renderVersion=0,gpuPollTimer=0;
     let cachedModel=null,modelKey="",cachedCamera=null,cameraKey="",driftStep=1e-4;
     const profileCache=new Map(),spectrumCache=new Map(),gpuJobs=[];
+    let glowTarget=null,accumulationTargets=[],accumulationIndex=0,displayKey="",glowKey="",progressiveKey="",progressiveSamples=0;
+    let diagnosticRequested=false,diagnosticTimer=0,lastDiagnosticAt=-Infinity,budgetLevel=BUDGET_SCALES.length-1,gpuBudgetMs=null,gpuBudgetAt=0,gpuBudgetSamples=0,budgetSamplesUsed=0,budgetRegime="";
+    // Scientific oracles keep their deterministic center ray unless they opt
+    // into the separate display-sampling checks. Four symmetric rays have zero
+    // mean camera offset; no moving observation event is accumulated.
+    const progressiveEnabled=verification.forceProgressive===true||Object.keys(verification).length===0;
+    const progressiveLimit=verification.progressiveSamples===1?1:STATIC_JITTER.length;
+    Object.assign(metrics,{composites:0,glowBuilds:0,diagnosticReadbacks:0,progressiveSamples:0,progressiveTarget:1,progressiveRaySamples:0,budgetLevel,budgetTimingSource:"pending"});
     metrics.timingSource=gpuTimer?"gpu-query-pending":"cpu-submission";metrics.traceTimingSource=metrics.timingSource;metrics.compositeTimingSource=metrics.timingSource;metrics.endToEndTimingSource="cpu-submission";metrics.timingSamples=[];metrics.renderVersion=0;metrics.diagnosticPending=false;metrics.modelBuilds=0;metrics.profileBuilds=0;metrics.observerBuilds=0;metrics.spectrumBuilds=0;
     // The optional verification argument is local to a test renderer. Product
     // configuration never gains accuracy, camera, emissivity or oracle switches.
@@ -530,16 +572,41 @@
       dynamicFrames.set(entry.slot%MAX_DYNAMIC_SLOTS,{...entry,layer});if(dynamicFrames.size>MAX_DYNAMIC_SLOTS)dynamicFrames.delete(dynamicFrames.keys().next().value);invalidateFluidFrameCache();geometryKey="";return true;
     }
     function sampler(p,name,unit,t,array=false){if(p.u[name]===undefined)return;gl.activeTexture(gl.TEXTURE0+unit);gl.bindTexture(array?gl.TEXTURE_2D_ARRAY:gl.TEXTURE_2D,t);gl.uniform1i(p.u[name],unit);}
-    function discardTarget(){
-      if(!target)return;
+    function deleteTarget(buffer){
+      if(!buffer)return;
       // Rebuilding a render target also unregisters its textures, avoiding stale
       // entries and duplicate deletion when quality or output size changes.
-      target.images.forEach(t=>{gl.deleteTexture(t);textures.delete(t);});gl.deleteFramebuffer(target.fbo);target=null;metrics.registeredTextures=textures.size;
+      buffer.images.forEach(t=>{gl.deleteTexture(t);textures.delete(t);});gl.deleteFramebuffer(buffer.fbo);metrics.registeredTextures=textures.size;
+    }
+    function discardTarget(){
+      deleteTarget(target);target=null;accumulationTargets.forEach(deleteTarget);accumulationTargets=[];progressiveSamples=0;progressiveKey="";
+    }
+    function createTarget(width,height,count){
+      const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
+      const images=Array.from({length:count},(_,i)=>{const t=texture(width,height);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0);return t;});gl.drawBuffers(images.map((_,i)=>gl.COLOR_ATTACHMENT0+i));
+      if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){deleteTarget({fbo,images});throw new Error("Physical render framebuffer incomplete");}
+      return {fbo,images,width,height};
     }
     function ensureTarget(width,height){
-      if(target?.width===width&&target?.height===height)return;discardTarget();const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-      const images=Array.from({length:3},(_,i)=>{const t=texture(width,height);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0);return t;});gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.COLOR_ATTACHMENT1,gl.COLOR_ATTACHMENT2]);
-      if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE)throw new Error("Physical render framebuffer incomplete");target={fbo,images,width,height};metrics.registeredTextures=textures.size;
+      if(target?.width===width&&target?.height===height)return;discardTarget();target=createTarget(width,height,3);
+    }
+    function accumulateSample(){
+      if(!accumulationTargets.length)accumulationTargets=[createTarget(target.width,target.height,2),createTarget(target.width,target.height,2)];
+      const previous=accumulationTargets[accumulationIndex];accumulationIndex=1-accumulationIndex;const next=accumulationTargets[accumulationIndex],p=accumulateProgram;
+      // Explicit ping-pong averaging does not require EXT_float_blend and never
+      // samples a texture attached to the framebuffer currently being written.
+      gl.bindFramebuffer(gl.FRAMEBUFFER,next.fbo);gl.viewport(0,0,target.width,target.height);gl.useProgram(p.p);
+      sampler(p,"uImage",0,target.images[0]);sampler(p,"uStokes",1,target.images[1]);sampler(p,"uPreviousImage",2,previous.images[0]);sampler(p,"uPreviousStokes",3,previous.images[1]);
+      gl.uniform1f(p.u.uWeight,1/(progressiveSamples+1));gl.drawArrays(gl.TRIANGLES,0,6);
+    }
+    function displayImages(){return progressiveSamples>0&&metrics.progressiveTarget>1?accumulationTargets[accumulationIndex].images:target.images;}
+    function updateGlow(size,images){
+      const key=[renderVersion,size.width,size.height].join(":");if(key===glowKey)return;
+      const scale=Math.min(.25,640/Math.max(size.width,size.height)),width=Math.max(1,Math.ceil(size.width*scale)),height=Math.max(1,Math.ceil(size.height*scale));
+      if(glowTarget?.width!==width||glowTarget?.height!==height){deleteTarget(glowTarget);glowTarget=createTarget(width,height,1);}
+      const p=glowProgram,started=performance.now();gl.bindFramebuffer(gl.FRAMEBUFFER,glowTarget.fbo);gl.viewport(0,0,width,height);gl.useProgram(p.p);
+      sampler(p,"uImage",0,images[0]);gl.uniform2f(p.u.uPixel,1/size.width,1/size.height);
+      const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"glow",performance.now()-started);glowKey=key;metrics.glowBuilds++;
     }
     function updateProfile(m){
       const key=[state.scene,m.spin,m.charge,m.outer,state.band,verification.spectrumReferenceTemperature].join(":");if(key===profileKey)return;profileKey=key;
@@ -561,42 +628,86 @@
     function deleteJob(job){if(job.query)gl.deleteQuery(job.query);if(job.fence)gl.deleteSync(job.fence);if(job.buffer)gl.deleteBuffer(job.buffer);}
     function diagnosticMetrics(data,version,time,frame=frameCounter){
       let unfinished=0,invalid=0;for(let i=0;i<data.length;i+=4){if(data[i]===0)unfinished++;if(data[i]===4)invalid++;}
+      if(frame<(metrics.diagnosticFrame??-1))return;
       metrics.unfinishedRays=unfinished;metrics.invalidRays=invalid;// Keep the original diagnostic frame/time fields beside the buffer version.
       metrics.diagnosticFrame=frame;metrics.diagnosticVersion=version;metrics.diagnosticTime=time;metrics.diagnosticCurrent=version===renderVersion;
     }
     function pollGpuJobs(){
-      gpuPollTimer=0;if(disposed)return;const now=performance.now(),disjoint=gpuTimer&&gl.getParameter(gpuTimer.GPU_DISJOINT_EXT);
+      gpuPollTimer=0;if(disposed)return;const now=performance.now(),disjoint=gpuTimer&&gl.getParameter(gpuTimer.GPU_DISJOINT_EXT);let diagnosticFinished=false;
+      // A disjoint event invalidates the controller's previous GPU estimate as
+      // well as new queries. Recover via the named wall-time fallback meanwhile.
+      if(disjoint){gpuBudgetMs=null;gpuBudgetSamples=0;budgetSamplesUsed=0;}
       for(let i=gpuJobs.length-1;i>=0;i--){
-        const job=gpuJobs[i],stale=job.version!==renderVersion;let ready=stale;
-        if(job.query)ready=ready||disjoint||gl.getQueryParameter(job.query,gl.QUERY_RESULT_AVAILABLE);
-        else if(!ready){const status=gl.clientWaitSync(job.fence,0,0);ready=status!==gl.TIMEOUT_EXPIRED;if(status===gl.WAIT_FAILED)job.failed=true;}
+        const job=gpuJobs[i],stale=job.version!==renderVersion;let ready;
+        // Old timing queries remain useful under GPU backlog. Only image
+        // diagnostics are version-specific; wait for their fence before reuse.
+        if(job.query)ready=disjoint||gl.getQueryParameter(job.query,gl.QUERY_RESULT_AVAILABLE);
+        else {const status=gl.clientWaitSync(job.fence,0,0);ready=status!==gl.TIMEOUT_EXPIRED;if(status===gl.WAIT_FAILED)job.failed=true;}
         if(!ready)continue;
         // Every asynchronous result belongs to exactly one float-buffer render.
         // A camera/physics/quality change makes all older diagnostics obsolete.
-        if(!stale&&!job.failed){
-          if(job.query)timing(job.kind,disjoint?job.cpu:gl.getQueryParameter(job.query,gl.QUERY_RESULT)/1e6,disjoint?"cpu-submission-disjoint":"gpu-query",job.version,job.frame);
-          else if(job.kind==="diagnostic"){
+        if(!job.failed){
+          if(job.query){
+            const ms=disjoint?job.cpu:gl.getQueryParameter(job.query,gl.QUERY_RESULT)/1e6;timing(job.kind,ms,disjoint?"cpu-submission-disjoint":"gpu-query",job.version,job.frame);
+            if(!disjoint&&job.kind==="trace"&&job.interactive&&job.regime===budgetRegime&&job.frame>=frameCounter-60){
+              const perRay=ms/job.rays;gpuBudgetMs=gpuBudgetMs===null?perRay:.8*gpuBudgetMs+.2*perRay;gpuBudgetSamples++;gpuBudgetAt=now;
+            }
+          }else if(job.kind==="diagnostic"){
+            // Moving frames may finish after the observation advances. Publish
+            // their provenance with diagnosticCurrent=false rather than starving
+            // slow devices of every sampled diagnostic; settling still reads exactly.
             const data=new Float32Array(job.length);gl.bindBuffer(gl.PIXEL_PACK_BUFFER,job.buffer);gl.getBufferSubData(gl.PIXEL_PACK_BUFFER,0,data);gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);diagnosticMetrics(data,job.version,job.time,job.frame);
-          }else timing("endToEnd",now-job.start,"gpu-fence-wall-upper-bound",job.version,job.frame);
+          }else if(!stale&&job.kind==="endToEnd")timing("endToEnd",now-job.start,"gpu-fence-wall-upper-bound",job.version,job.frame);
         }
+        if(job.kind==="diagnostic")diagnosticFinished=true;
         deleteJob(job);gpuJobs.splice(i,1);
       }
       metrics.diagnosticPending=gpuJobs.some(job=>job.kind==="diagnostic"&&job.version===renderVersion);
+      if(diagnosticFinished&&diagnosticRequested&&!document.hidden)onNeedsFrame();
       if(gpuJobs.length)gpuPollTimer=setTimeout(pollGpuJobs,8);
     }
     function enqueueJob(job){
-      gpuJobs.push(job);if(gpuJobs.length>24){const old=gpuJobs.shift();deleteJob(old);}if(!gpuPollTimer)gpuPollTimer=setTimeout(pollGpuJobs,8);
+      gpuJobs.push(job);if(gpuJobs.length>24){
+        // Retain the single diagnostic PBO until its fence completes. Timing
+        // history is bounded independently so backlog cannot multiply readbacks.
+        let index=gpuJobs.findIndex(entry=>entry.kind!=="diagnostic"&&entry.kind!=="trace");
+        if(index<0)index=gpuJobs.findIndex(entry=>entry.kind!=="diagnostic");
+        const old=gpuJobs.splice(index,1)[0];deleteJob(old);
+      }if(!gpuPollTimer)gpuPollTimer=setTimeout(pollGpuJobs,8);
     }
     function startTiming(){if(!gpuTimer)return null;const query=gl.createQuery();gl.beginQuery(gpuTimer.TIME_ELAPSED_EXT,query);return query;}
-    function finishTiming(query,kind,cpu){
-      if(query){gl.endQuery(gpuTimer.TIME_ELAPSED_EXT);enqueueJob({query,kind,cpu,version:renderVersion,frame:frameCounter});}
+    function finishTiming(query,kind,cpu,work={}){
+      if(query){gl.endQuery(gpuTimer.TIME_ELAPSED_EXT);enqueueJob({query,kind,cpu,version:renderVersion,frame:frameCounter,...work});}
       else timing(kind,cpu,"cpu-submission",renderVersion,frameCounter);
     }
-    function queueDiagnostic(){
-      if(verification.disableTimers)return;
+    function queueDiagnostic(force=false){
+      if(verification.disableTimers||!diagnosticRequested||disposed||document.hidden||!target)return;
+      // At most one full PBO readback is in flight. Keep the newest request, not
+      // a queue of obsolete frames, and obtain exact counts after settling.
+      if(gpuJobs.some(job=>job.kind==="diagnostic"))return;
+      const wait=DIAGNOSTIC_INTERVAL-(performance.now()-lastDiagnosticAt);
+      if(!force&&wait>0){if(!diagnosticTimer)diagnosticTimer=setTimeout(()=>{diagnosticTimer=0;onNeedsFrame();},wait);return;}
+      clearTimeout(diagnosticTimer);diagnosticTimer=0;diagnosticRequested=false;lastDiagnosticAt=performance.now();
+      gl.bindFramebuffer(gl.FRAMEBUFFER,target.fbo);
       const length=target.width*target.height*4,buffer=gl.createBuffer();gl.bindBuffer(gl.PIXEL_PACK_BUFFER,buffer);gl.bufferData(gl.PIXEL_PACK_BUFFER,length*4,gl.STREAM_READ);
       gl.readBuffer(gl.COLOR_ATTACHMENT2);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,0);gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);
-      const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);enqueueJob({kind:"diagnostic",buffer,fence,length,version:renderVersion,time:state.time,frame:frameCounter});metrics.diagnosticPending=true;
+      const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);enqueueJob({kind:"diagnostic",buffer,fence,length,version:renderVersion,time:state.time,frame:frameCounter});gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.flush();metrics.diagnosticPending=true;metrics.diagnosticReadbacks++;
+    }
+    function adaptBudget(active,duration,regime){
+      if(!active||Number.isFinite(verification.rayBudget))return;
+      if(regime!==budgetRegime){budgetRegime=regime;gpuBudgetMs=null;gpuBudgetSamples=0;budgetSamplesUsed=0;}
+      if(gpuTimer&&gpuBudgetMs!==null&&performance.now()-gpuBudgetAt<1000){
+        ema=gpuBudgetMs*Math.max(1,metrics.raySamples)+(metrics.compositeMs||0)+(metrics.glowMs||0);metrics.budgetTimingSource="gpu-query";
+        if(gpuBudgetSamples-budgetSamplesUsed<3)return;budgetSamplesUsed=gpuBudgetSamples;
+      }else{
+        // Without a valid GPU timer, elapsed frame time is an explicitly named
+        // scheduling fallback, never advertised as measured shader execution.
+        if(!(duration>0&&duration<1000))return;ema=.9*ema+.1*duration;metrics.budgetTimingSource="frame-wall";
+        if(frameCounter%12!==0)return;
+      }
+      if(ema>36&&budgetLevel>0)budgetLevel--;
+      else if(ema<24&&budgetLevel<BUDGET_SCALES.length-1)budgetLevel++;
+      budgetScale=BUDGET_SCALES[budgetLevel];metrics.budgetLevel=budgetLevel;
     }
     function fluidFrameUniforms(){
       if(!simulation)return emptyFluidFrames;
@@ -616,7 +727,7 @@
       metrics.historyMissing=Boolean(dynamic.length&&!keepHistory);
       fluidFrameCache={times,layers,count};fluidFrameCacheDirty=false;return fluidFrameCache;
     }
-    function render(size,quality){
+    function render(size,quality,jitter=[0,0]){
       const started=performance.now(),m=sceneModel(),camera=observer(m);updateProfile(m);
       const requested=state.density||160000,budget=verification.rayBudget??Math.min(quality?requested*2:Math.max(16000,requested*budgetScale),quality?650000:240000,size.width*size.height);
       const aspect=size.width/size.height,height=Math.max(32,Math.floor(Math.sqrt(budget/aspect))),width=Math.max(32,Math.floor(height*aspect));ensureTarget(width,height);renderVersion++;metrics.renderVersion=renderVersion;metrics.diagnosticCurrent=false;
@@ -629,6 +740,7 @@
       // instead would lurch by a large fraction of the viewport at wide framing.
       driftStep=DRIFT_RETRACE_PIXELS*(size.dpr||1)/(lens*Math.max(1e-6,camera.r));
       gl.uniform2f(u.uExtent,size.width/lens,size.height/lens);gl.uniform2f(u.uConstants,profile.constants.energy,profile.constants.angularMomentum);
+      gl.uniform2f(u.uJitter,jitter[0]/width,jitter[1]/height);
       // The observation event's KS time shifts the retarded fluid time.  The
       // renderer never extrapolates beyond the newest complete solver snapshot.
       const observationTime=350+state.time*8+camera.coordinateTime,availableTime=metrics.latestSimulationTime??metrics.historyEndTime,simulationTime=m.flow==="grmhd"?Math.min(observationTime,availableTime):observationTime,rhoUnit=simulation?m.massRate/(simulation.metadata.accretionRateCode*m.rg*m.rg*A.constants.c)*.001:0;
@@ -639,15 +751,15 @@
       gl.uniform1i(u.uMaxSteps,verification.maxSteps??(quality?2048:1200));gl.uniform1i(u.uHotspot,state.scene==="hotspot"?1:0);gl.uniform1i(u.uSkyEnabled,verification.skyEnabled===false?0:1);
       if(u.uTimes!=null){const frames=fluidFrameUniforms();if(simulation)gl.uniform2f(u.uGrid,simulation.metadata.radialStart,simulation.metadata.radialStep);else{frames.times[0]=0;frames.layers[0]=0;gl.uniform2f(u.uGrid,0,1);}gl.uniform1fv(u.uTimes,frames.times);if(u.uLayers)gl.uniform1iv(u.uLayers,frames.layers);gl.uniform1i(u.uFrameCount,frames.count);}
       sampler(p,"uDisk",0,diskTexture);sampler(p,"uSpectrum",1,spectrumTexture);sampler(p,"uBessel",2,besselTexture);sampler(p,"uTheta",3,thetaTexture);["uFluid","uVelocity","uMagnetic"].forEach((name,i)=>sampler(p,name,4+i,fluidTextures[i],true));
-      const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"trace",performance.now()-started);
+      const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"trace",performance.now()-started,{interactive:!quality,regime:state.scene+":"+scalar,rays:width*height});
       metrics.geodesicBuilds++;metrics.traceWidth=width;metrics.traceHeight=height;metrics.raySamples=width*height;metrics.traceQuality=quality?"refined":"interactive";metrics.transferMode=scalar?"scalar-intensity":"full-stokes";metrics.geodesicStepper=verification.forceUnseededBS?"bs32-unseeded":"bs32-fsal";
       metrics.observerDistance=camera.r;metrics.initialObserverDistance=m.initialObserverDistance??80;metrics.computationalRadius=m.outer;metrics.skyRadius=m.skyRadius??150;metrics.observerKind=state.observer;metrics.horizonFade=0;metrics.fluid=m.flow;metrics.observationTime=m.flow==="grmhd"?observationTime:null;metrics.simulationTime=m.flow==="grmhd"?simulationTime:null;metrics.waitingForData=m.flow==="grmhd"&&observationTime>availableTime+1e-6;metrics.movieEnded=m.flow==="grmhd"&&(metrics.continuationStatus==="unavailable"||metrics.continuationStatus==="failed")&&observationTime>=availableTime;metrics.cameraProperTime=camera.properTime;
       // Production readback is PBO/fence based; tests use readback() below to
       // obtain all channels synchronously and update exact status counts.
-      queueDiagnostic();
+      diagnosticRequested=true;
     }
     function draw(size,seconds=0){
-      if(disposed)return;frameCounter++;const started=performance.now(),duration=lastWall===null?0:started-lastWall;lastWall=started;
+      if(disposed||document.hidden)return;frameCounter++;const started=performance.now(),duration=lastWall===null?0:started-lastWall;lastWall=started;
       const currentModel=sceneModel();
       if(currentModel.flow==="grmhd"&&simulation&&continuation){
         const solverActive=!state.paused&&!document.hidden;
@@ -665,29 +777,53 @@
       // the quality actually rendered, never an anticipated refinement flag.
       if((lastInteractive&&!state.interacting)||(lastActive&&!active))refinementDue=true;
       lastInteractive=Boolean(state.interacting);lastActive=active;
-      if(active&&duration>0&&duration<1000&&!Number.isFinite(verification.rayBudget)){ema=.9*ema+.1*duration;if(frameCounter%12===0)budgetScale=R.clamp(budgetScale*Math.sqrt(33/Math.max(10,ema)),.125,1);}
+      adaptBudget(active,duration,state.scene+":"+(currentModel.flow==="thermal"&&state.display==="intensity"&&!verification.forceFullThermal));
       const quality=Boolean(!state.interacting&&(state.paused||(!active&&refinementDue)));
-      if(changed||(evolving&&lastTime!==state.time)||quality!==refined||!target){render(size,quality);lastTime=state.time;refined=quality;}
+      const goal=progressiveEnabled&&quality&&state.paused&&!state.interacting&&state.display!=="accuracy"?progressiveLimit:1;
+      const sampleKey=[key,quality,goal,evolving?state.time:0,!quality&&!Number.isFinite(verification.rayBudget)?budgetLevel:0].join(":");
+      const retrace=changed||(evolving&&lastTime!==state.time)||quality!==refined||!target||sampleKey!==progressiveKey;
+      if(retrace){
+        progressiveSamples=0;metrics.progressiveRaySamples=0;
+        render(size,quality,goal>1?STATIC_JITTER[0]:(verification.sampleJitter||[0,0]));
+        progressiveKey=sampleKey;metrics.progressiveTarget=goal;
+        if(goal>1)accumulateSample();progressiveSamples=1;
+        lastTime=state.time;refined=quality;
+      }else if(goal>1&&progressiveSamples<goal){
+        render(size,quality,STATIC_JITTER[progressiveSamples]);accumulateSample();progressiveSamples++;
+      }
+      metrics.progressiveSamples=progressiveSamples;metrics.progressiveRaySamples=progressiveSamples*metrics.raySamples;
+      if(goal>1&&progressiveSamples<goal)onNeedsFrame();
+      // Finish static sampling before reading diagnostics. Active playback reads
+      // at a bounded cadence; its counters always retain the originating version.
+      if(goal===1||progressiveSamples===goal)queueDiagnostic(quality);
+      const nextDisplayKey=[renderVersion,state.exposure,state.band,state.display,size.width,size.height].join(":");
+      metrics.frameMs=ema;metrics.budgetScale=budgetScale;
+      if(nextDisplayKey===displayKey)return;
+      const images=displayImages();updateGlow(size,images);
       const compositeStarted=performance.now();gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);gl.useProgram(displayProgram.p);
-      sampler(displayProgram,"uImage",0,target.images[0]);sampler(displayProgram,"uStokes",1,target.images[1]);sampler(displayProgram,"uDiagnostic",2,target.images[2]);
+      sampler(displayProgram,"uImage",0,images[0]);sampler(displayProgram,"uStokes",1,images[1]);sampler(displayProgram,"uDiagnostic",2,target.images[2]);sampler(displayProgram,"uGlow",3,glowTarget.images[0]);
       const displayGain=A.scenes[state.scene]?.displayGain||1;
       // Exposure only composites existing float buffers and never rebuilds the
       // model, disk/spectrum table, observer or geodesics.
-      gl.uniform2f(displayProgram.u.uPixel,1/size.width,1/size.height);gl.uniform2f(displayProgram.u.uOutput,size.width,size.height);gl.uniform1f(displayProgram.u.uExposure,(state.exposure||1)*displayGain);
+      gl.uniform2f(displayProgram.u.uOutput,size.width,size.height);gl.uniform1f(displayProgram.u.uExposure,(state.exposure||1)*displayGain);
       gl.uniform1i(displayProgram.u.uBand,["visible","xray","radio","bolometric"].indexOf(state.band));gl.uniform1i(displayProgram.u.uDisplay,["intensity","linear","circular","accuracy"].indexOf(state.display));const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"composite",performance.now()-compositeStarted);
       if(!verification.disableTimers){const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);enqueueJob({kind:"endToEnd",fence,start:started,version:renderVersion,frame:frameCounter});gl.flush();}else timing("endToEnd",performance.now()-started,"cpu-submission",renderVersion,frameCounter);
-      metrics.frameMs=ema;metrics.budgetScale=budgetScale;metrics.displayGain=displayGain;metrics.radianceReference=profile.reference;metrics.frames++;
+      displayKey=nextDisplayKey;metrics.displayGain=displayGain;metrics.radianceReference=profile.reference;metrics.frames++;metrics.composites++;
     }
     function resetSimulation(){
       dynamicFrames.clear();invalidateFluidFrameCache();geometryKey="";metrics.latestSimulationTime=metrics.historyEndTime;metrics.solverProgressTime=metrics.historyEndTime;metrics.observationTime=null;metrics.simulationTime=null;metrics.historyMissing=false;metrics.waitingForData=false;
       continuation?.reset();onNeedsFrame();
     }
     function setSolverActive(value){continuation?.setActive(Boolean(value));}
-    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();textures.forEach(t=>gl.deleteTexture(t));textures.clear();resources.reverse().forEach(f=>f());}
+    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);clearTimeout(diagnosticTimer);continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();deleteTarget(glowTarget);glowTarget=null;textures.forEach(t=>gl.deleteTexture(t));textures.clear();metrics.registeredTextures=0;resources.reverse().forEach(f=>f());}
     return {kind:"webgl",physical:true,metrics,count:()=>metrics.raySamples,draw,resetSimulation,setSolverActive,refine(){refinementDue=true;onNeedsFrame();},dispose,
       // Full synchronous test readback intentionally waits for GPU completion;
       // production diagnostics above never issue a blocking typed-array read.
-      readback(){if(!target)return null;gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);gl.bindFramebuffer(gl.FRAMEBUFFER,target.fbo);const outputs=target.images.map((_,i)=>{const data=new Float32Array(target.width*target.height*4);gl.readBuffer(gl.COLOR_ATTACHMENT0+i);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,data);return data;});gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.bindFramebuffer(gl.FRAMEBUFFER,null);diagnosticMetrics(outputs[2],renderVersion,state.time);return {width:target.width,height:target.height,renderVersion,radiance:outputs[0],stokes:outputs[1],diagnostic:outputs[2]};}};
+      // Raw readback remains a single-ray scientific oracle. Display readback
+      // optionally returns linear averaged Stokes/radiance, with unaveraged
+      // diagnostic codes from the latest completed sample in either case.
+      readback({display=false}={}){if(!target)return null;gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);const accumulated=display&&metrics.progressiveTarget>1&&progressiveSamples>0;
+        const outputs=target.images.map((_,i)=>{const source=accumulated&&i<2?accumulationTargets[accumulationIndex]:target;gl.bindFramebuffer(gl.FRAMEBUFFER,source.fbo);const data=new Float32Array(target.width*target.height*4);gl.readBuffer(gl.COLOR_ATTACHMENT0+i);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,data);return data;});gl.bindFramebuffer(gl.FRAMEBUFFER,null);diagnosticMetrics(outputs[2],renderVersion,state.time);return {width:target.width,height:target.height,renderVersion,samples:accumulated?progressiveSamples:1,radiance:outputs[0],stokes:outputs[1],diagnostic:outputs[2]};}};
   }
   globalThis.BlackHolePhysicalRenderer=Object.freeze({create});
 })();

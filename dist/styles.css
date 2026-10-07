@@ -153,9 +153,10 @@ h2 { font-size: 16px; font-weight: 600; line-height: 1.4; }
 }
 
 @media (max-height: 520px) and (min-width: 601px) {
-  /* Short landscape windows give the fixed rows less chrome and let the center
-     row absorb the remaining height. */
-  .controls { top: 48px; max-height: calc(100svh - 12px); }
+  /* The header plus solver footer can exceed a short viewport by themselves.
+     Let the whole panel scroll here, preserving access to every operation. */
+  .controls { top: 48px; max-height: calc(100svh - max(16px, env(safe-area-inset-top)) - 48px - max(16px, env(safe-area-inset-bottom))); grid-template-rows: auto auto auto; overflow-y: auto; }
+  .control-scroll { overflow: visible; }
   .panel-top { padding-block: 10px; }
   .preset-choice { margin-top: 9px; }
   .control-group > summary { min-height: 44px; }
