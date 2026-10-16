@@ -109,6 +109,30 @@ window.runRenderPerformanceChecks=async function(){
     assert(engine.metrics.progressiveSamples===1,"Resize retained accumulation from a different pixel grid");
     report.checks.push({name:"progressive sampling has finite completion, exposure reuse, camera/motion/resize reset",completed,after:snapshot(),frameRequests});
 
+    // Reuse the coarse framebuffer after refinement: resizing it would delete
+    // the old textures and hide sampler feedback left by the previous pass.
+    // Cover both trace programs, sampling modes and float-filtering paths.
+    const refinementRedraws=[];
+    for(const manualFiltering of [false,true])for(const forceFullThermal of [false,true])for(const progressiveSamples of [1,4]){
+      disableFloatLinear=manualFiltering;
+      await create({}, {rayBudget:16000,disableTimers:true,forceProgressive:true,progressiveSamples,displayEnhancements:true,forceFullThermal});settle();
+      assert(gl.getError()===gl.NO_ERROR,"Initial edge refinement produced a WebGL error");
+      assert(engine.metrics.refineBuilds===1&&engine.metrics.refineWidth>engine.metrics.traceWidth,"Edge refinement did not run on a finer grid");
+      const dimensions=[engine.metrics.traceWidth,engine.metrics.traceHeight];let previous=engine.readback();
+      for(const yaw of [.15,.3]){
+        const builds=engine.metrics.refineBuilds;state.yaw=yaw;draw();
+        assert(gl.getError()===gl.NO_ERROR,"Camera redraw after edge refinement produced a WebGL error");
+        settle();const image=engine.readback();validate(image);
+        assert(gl.getError()===gl.NO_ERROR,"Progressive redraw after edge refinement produced a WebGL error");
+        assert(engine.metrics.traceWidth===dimensions[0]&&engine.metrics.traceHeight===dimensions[1],"Camera redraw replaced the coarse pixel grid");
+        assert(engine.metrics.refineBuilds===builds+1,"Camera redraw did not rebuild edge refinement");
+        assert(image.radiance.some((value,i)=>value!==previous.radiance[i]),"Camera redraw retained stale physical radiance");previous=image;
+      }
+      refinementRedraws.push({manualFiltering,forceFullThermal,progressiveSamples,dimensions,refineBuilds:engine.metrics.refineBuilds});
+    }
+    disableFloatLinear=false;
+    report.checks.push({name:"camera redraw after edge refinement reuses coarse targets without sampler feedback or stale radiance",variants:refinementRedraws});
+
     // The reference is an arithmetic mean of independent physical integrations,
     // not a copy of the accumulation shader. Nonzero GRMHD Q/U/V catches errors
     // that scalar intensity alone would leave undetected.
