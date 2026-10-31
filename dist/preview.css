@@ -1,0 +1,72 @@
+/* The preview shares the homepage's tokens, but owns its presentation layout.
+   No app.js or global preview flag changes the interactive observation page. */
+.preview {
+  position: relative;
+  display: grid;
+  align-items: end;
+  min-height: 100svh;
+  isolation: isolate;
+  background: var(--bg);
+}
+
+.preview-image {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+  color: var(--muted);
+}
+
+.preview-caption {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 24px;
+  padding: clamp(24px, 5vw, 64px);
+}
+
+.preview-caption h1 {
+  font-size: clamp(32px, 4.4vw, 56px);
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -.025em;
+}
+
+.preview-subtitle {
+  margin-top: 12px;
+  font-size: clamp(20px, 2.2vw, 28px);
+  letter-spacing: .16em;
+}
+
+.preview-description {
+  font-size: clamp(16px, 1.6vw, 20px);
+  text-align: right;
+}
+
+.preview-detail {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.preview-note {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+@media (max-width: 600px) {
+  .preview-caption {
+    flex-direction: column;
+    align-items: start;
+  }
+
+  .preview-description {
+    text-align: left;
+  }
+}

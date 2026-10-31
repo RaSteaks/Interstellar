@@ -2,5 +2,6 @@
 .sites-runtime/
 premium-audit.json
 verification/
+.wrangler/
 *.tar.gz
 anime/

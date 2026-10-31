@@ -44,6 +44,7 @@
 - [场景预设](#scenes)
 - [快速开始](#quickstart)
   - [运行环境要求](#requirements)
+- [作品集 iframe 预览](#preview)
 - [科学模型与代码位置](#architecture)
 - [检查与验证](#checks)
 - [GRMHD 数据与可复现性](#grmhd)
@@ -101,6 +102,67 @@ python3 tools/build-grmhd-runtime.py
 > **安全上下文必需。** GRMHD 场景首次使用时会下载 `dist/data/grmhd-torus.f32.gz`（7,193,290 字节，6.9 MiB）并按元数据校验 SHA-256，需要 `DecompressionStream` 与 `SubtleCrypto`，即安全上下文（`localhost` 或 https）。校验失败会在面板中报告，而不是静默降级。
 
 > **热流场景为按需加载。** 首次播放还会加载 `dist/data/grmhd-torus.checkpoint.bin.gz`（359,400 字节）与 `dist/solver/grmhd-runtime.wasm`（1,731,097 字节）；检查点恢复失败、Worker 异常或 Wasm 加载失败会明确回退到 t=0–800 的有限播放，不会标称持续求解。
+
+<a id="preview"></a>
+
+## 作品集 iframe 预览
+
+`/preview` 可直接访问和刷新；以 `dist/` 为站点根目录、使用 Cloudflare 默认 HTML 路径处理时，目录文档 `dist/preview/index.html` 的最终地址为 **`/preview/`**，`/preview` 会重定向到该地址。当前 Sites 域名下的地址为 `https://interstellar.rasteaks.chatgpt.site/preview/`。
+
+预览复用公开的 `dist/screenshot.jpeg` 和 `dist/styles.css` 中的主题变量，布局由 `dist/preview.css` 独立维护。以 1280×800 的黑洞画面为主体，下方保留项目名和简短说明；也支持较小的直接访问视口。它不加载 `app.js`、WebGL、GRMHD 数据或求解 Worker，没有登录、Cookie、Referer、父窗口 DOM 或交互依赖，不播放媒体、不发起写操作。图片失败或 JavaScript 关闭时，项目名与说明仍可展示。
+
+### 嵌入策略与托管
+
+`dist/_headers` 为支持该文件的静态托管声明三个精确路径：`/preview`、`/preview/` 和 `/preview/index.html`，期望最终文档发送：
+
+```http
+Content-Security-Policy: frame-ancestors 'self' https://blog.rasteaks.cn:8443
+X-Robots-Tag: noindex
+```
+
+规则要求在相同路径移除 `X-Frame-Options`，由 `frame-ancestors` 限制嵌入；端口 **8443** 是允许 Origin 的一部分。预览 HTML 也包含 `robots=noindex`，没有加入 sitemap。`noindex` 只控制索引，预览内容仍是公开内容。首页、资源及其它路径的响应头保持原样。
+
+仓库没有 Worker/SSR 入口、全局 CSP/X-Frame-Options 或代理配置，`.openai/hosting.json` 仍原样发布 `dist/`；必须把 `_headers` 一同交给支持该文件的静态资产层。Cloudflare 的规则解析、路径规范化与响应头行为分别见[静态资源响应头文档](https://developers.cloudflare.com/workers/static-assets/headers/)和[HTML 路径文档](https://developers.cloudflare.com/workers/static-assets/routing/advanced/html-handling/)。这里没有增加按请求执行的 Worker、存储或付费服务。
+
+2026-10-31 已发布并验证 Sites 版本 17：预览及真实博客 Origin 的 iframe 显示正常，首页结构和公开资源保持一致；但当前 Sites 静态托管将 `_headers` 当普通文件返回，**未应用其中的 CSP 或 X-Robots-Tag**。预览的 HTML `robots=noindex` 仍存在，X-Frame-Options 未发送，但未允许的 Origin 也能嵌入，因此限定父站点的要求尚未在生产生效。实际响应、正反向浏览器验证及截图保存在 `verification/preview/production/`。
+
+仓库不控制 Sites/CDN 的上游规则。Cloudflare 本地运行时处理 `_headers` 的成功结果不能代替 Sites 生产验证；修复托管支持或变更部署入口后，需再次检查预览文档的最终 GET 响应：
+
+```bash
+curl -sS -L -D - -o /dev/null https://interstellar.rasteaks.chatgpt.site/preview
+```
+
+若托管平台不处理 `_headers`，需在该平台的静态响应配置中，**仅为上述三个预览路径**设置同等 CSP、移除 X-Frame-Options 并添加 X-Robots-Tag。若 CDN、反向代理或 Cloudflare Transform Rules 另有 CSP，只调整预览路径在原策略中的 `frame-ancestors`，保留其他指令；不要追加一条 CSP 来试图覆盖旧策略，也不要放宽首页或其它路径。后续若改由 Worker 动态返回 HTML，须在对应 Response 中设置这些头，不能依赖静态 `_headers`。
+
+父站点可以使用以下配置；等比例缩小时保留 iframe 的 1280×800 内部尺寸，再由父站点缩放整个元素：
+
+```html
+<iframe
+  src="https://interstellar.rasteaks.chatgpt.site/preview/"
+  title="Interstellar 黑洞观测站作品预览"
+  width="1280"
+  height="800"
+  sandbox="allow-scripts allow-same-origin"
+  referrerpolicy="no-referrer"
+></iframe>
+```
+
+若父站点有 CSP，它自己的 `frame-src` 也须允许 `https://interstellar.rasteaks.chatgpt.site`；本仓库不修改父站点。无需增加 CORS 白名单。
+
+### 本地验证与发布流程
+
+没有新增构建步骤或项目依赖；发布产物仍是已经可用的 `dist/`。部署继续使用现有 Sites 的版本保存与发布流程（仓库未定义 CLI 部署命令），无需改为 Worker 项目。本地验证使用宿主机工具，禁止启动历史检查脚本中的 Chrome runner：
+
+```bash
+# 从仓库根目录启动 Cloudflare 本地静态资产服务；不执行部署。
+npx wrangler@4 dev --assets ./dist --port 18765 --ip 127.0.0.1
+
+# 在另一个终端运行，PLAYWRIGHT_MODULE 指向宿主机已有的 Playwright 包。
+PLAYWRIGHT_MODULE=/path/to/playwright node checks/preview.cjs http://127.0.0.1:18765
+# 如已安装 Firefox，也可选择 PREVIEW_BROWSER=firefox；默认 headless WebKit。
+```
+
+普通 `python3 -m http.server` 可以查看 HTML，但不会解析 `_headers`，不能作为安全响应头验证。`checks/preview.cjs` 验证实际 GET/重定向、唯一 CSP、无 X-Frame-Options、noindex、1280×800/640×400/390×844 布局、无图无 JS 降级及首页控件。嵌入用隔离的 HTTPS 测试父文档保留精确 Origin 与上述 sandbox/referrerpolicy，转发本地资产响应而不改 CSP：允许 8443、同源与 0.5 倍缩放，拒绝错误端口和其它 Origin。它不访问真实博客，也不修改正式白名单；截图、响应头和报告保存在被忽略的 `verification/preview/`。本地成功不代表真实父站点或新页面的生产验证通过。
 
 <a id="architecture"></a>
 

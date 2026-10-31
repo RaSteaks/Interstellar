@@ -1,0 +1,16 @@
+# Exact document paths only: never relax the interactive page or future routes.
+# Keep all frame ancestors in ONE policy; another CSP cannot loosen this one.
+/preview
+  Content-Security-Policy: frame-ancestors 'self' https://blog.rasteaks.cn:8443
+  ! X-Frame-Options
+  X-Robots-Tag: noindex
+
+/preview/
+  Content-Security-Policy: frame-ancestors 'self' https://blog.rasteaks.cn:8443
+  ! X-Frame-Options
+  X-Robots-Tag: noindex
+
+/preview/index.html
+  Content-Security-Policy: frame-ancestors 'self' https://blog.rasteaks.cn:8443
+  ! X-Frame-Options
+  X-Robots-Tag: noindex
