@@ -10,6 +10,7 @@ const near=(actual,expected)=>assert.ok(Math.abs(actual-expected)<1e-10,`${actua
 // DOM and GPU are doubles; no drift or interaction-state logic is copied here.
 function fixture(reduced=false){
  let now=0,nextId=1,state,refinements=0;const frames=new Map(),timers=new Map(),nodes=new Map(),registry=new Map();
+ const rendererMetrics={dataStatus:'ready',timingSource:'cpu-submit',grmhdResolution:[64,64],grmhdFrames:41,latestSimulationTime:800};
  class Target{
   constructor(){
    this.listeners=new Map();this.classes=new Set();this.capture=new Set();
@@ -47,7 +48,7 @@ function fixture(reduced=false){
  const context={document,window,console,AbortController,performance:{now:()=>now},ResizeObserver:class{observe(){}},
   requestAnimationFrame:handler=>{const id=nextId++;frames.set(id,handler);return id;},cancelAnimationFrame:id=>frames.delete(id),
   setTimeout:(handler,delay)=>{const id=nextId++;timers.set(id,{handler,at:now+delay});return id;},clearTimeout:id=>timers.delete(id),
-  BlackHolePhysicalRenderer:{create:options=>{state=options.state;return {kind:'webgl',physical:true,count:()=>state.density,draw(){},refine(){refinements++;},metrics:{dataStatus:'ready',timingSource:'cpu-submit'}};}}
+  BlackHolePhysicalRenderer:{create:options=>{state=options.state;return {kind:'webgl',physical:true,count:()=>state.density,draw(){},refine(){refinements++;},metrics:rendererMetrics};}}
  };
  vm.createContext(context);
  // Use the real timelike camera/scene logic; only rasterization remains a double.
@@ -60,7 +61,7 @@ function fixture(reduced=false){
   }
  }
  function preference(matches){media.matches=matches;media.fire('change',{matches});}
- return {advance,preference,state:()=>state,surface:node('cosmos'),shell:node('control-shell'),document,window,node,models,refinements:()=>refinements,configure:settings=>registry.get('configure_observation').execute(settings),observe:()=>registry.get('get_observation').execute({})};
+ return {advance,preference,state:()=>state,metrics:rendererMetrics,surface:node('cosmos'),shell:node('control-shell'),document,window,node,models,refinements:()=>refinements,configure:settings=>registry.get('configure_observation').execute(settings),observe:()=>registry.get('get_observation').execute({})};
 }
 
 const baseline=fixture();baseline.advance(30);near(baseline.state().drift,30*speed);
@@ -126,7 +127,7 @@ panel.advance(5);assert.ok(panel.state().drift>panelAngle);
 // interface: startup/reset restore 8°; preset provenance follows effective physics, not lens/display edits.
 const presets=fixture();
 assert.equal(presets.observe().tilt,8);assert.equal(presets.observe().presetCustomized,false);
-assert.equal(fs.readFileSync(path.join(dist,'index.html'),'utf8').match(/<select id="scene-choice"[^>]*>(.*?)<\/select>/s)[1].match(/<option/g).length,10);
+assert.equal(fs.readFileSync(path.join(dist,'index.html'),'utf8').match(/<select id="scene-choice"[^>]*>(.*?)<\/select>/s)[1].match(/<option/g).length,12);
 presets.configure({scene:'isolated',spin:.8,charge:.4});assert.equal(presets.observe().presetCustomized,false); // the metric suppresses both dormant values
 presets.configure({scene:'charged'});assert.equal(presets.observe().presetCustomized,false);
 presets.configure({model:'schwarzschild'});assert.equal(presets.observe().scene,'charged');assert.equal(presets.observe().spin,0);assert.equal(presets.observe().charge,0);assert.equal(presets.observe().presetCustomized,true);
@@ -197,4 +198,41 @@ assert.equal(resume.state().flightRadius,framing.radius);
 resume.configure({tilt:30});
 assert.equal(resume.state().flightLens,null);assert.equal(resume.state().flightRadius,null);assert.equal(resume.observe().falling,false);
 
-console.log('PASS: production idle drift, pointer/native gesture lifetimes, reduced-motion and pause; preset select/customize/revert/restore/reset, GRMHD controls and atomic interface rejection; paused journey and range release refinement; exposure drag remains display-only; journey resume keeps its calibrated lens.');
+// The orbital scene shares the real preset/action path, including atomic
+// rejection, pause/resume, terminal replay and reduced-motion restrictions.
+const orbital=fixture();orbital.configure({scene:'plunge',tilt:30,paused:true});
+assert.equal(orbital.observe().flight.r,80);assert.equal(orbital.node('spin').disabled,true);assert.equal(orbital.node('charge').disabled,true);
+for(const button of orbital.models)assert.equal(button.disabled,button.dataset.model!=='schwarzschild');
+for(const patch of [{model:'kerr',spin:.5,exposure:2},{spin:.01,paused:false},{charge:.1},{scene:'plunge',model:'reissner'}]){
+ const before=JSON.stringify(orbital.state());assert.throws(()=>orbital.configure(patch));assert.equal(JSON.stringify(orbital.state()),before);
+}
+orbital.node('fall').fire('click');orbital.advance(2);
+assert.ok(orbital.observe().flight.r<80&&orbital.observe().flight.orbit>0);
+const beforeLook=orbital.observe();orbital.configure({look:'outward'});
+assert.equal(orbital.observe().falling,true);assert.equal(orbital.observe().flight.r,beforeLook.flight.r);
+assert.deepEqual(orbital.observe().flight.u,beforeLook.flight.u);
+orbital.configure({paused:true});const frozenOrbit=JSON.stringify(orbital.observe().flight);orbital.advance(1);assert.equal(JSON.stringify(orbital.observe().flight),frozenOrbit);
+orbital.configure({paused:false,speed:3});orbital.advance(18);
+assert.equal(orbital.observe().falling,false);assert.equal(orbital.observe().paused,true);assert.equal(orbital.observe().flight.stage,'inside');
+assert.equal(orbital.node('fall').textContent,'重播绕行坠落旅程');
+orbital.node('fall').fire('click');assert.equal(orbital.observe().falling,true);assert.equal(orbital.observe().paused,false);
+assert.equal(orbital.observe().flight.r,80);assert.equal(orbital.observe().flight.orbit,0);assert.equal(orbital.observe().tilt,30);
+assert.equal(orbital.observe().look,'outward');
+orbital.configure({scene:'quasar'});assert.equal(orbital.models[1].disabled,false);assert.equal(orbital.node('spin').disabled,false);
+const quietOrbit=fixture(true);quietOrbit.configure({scene:'plunge'});assert.equal(quietOrbit.node('fall').disabled,true);
+assert.throws(()=>quietOrbit.configure({falling:true}));quietOrbit.configure({zoom:4});quietOrbit.advance(.2);assert.ok(quietOrbit.observe().flight.r<80);
+
+const volume=fixture();Object.assign(volume.metrics,{latestSimulationTime:400,continuationStatus:'finite-3d',grmhdResolution:[96,64,32],grmhdFrames:21});
+volume.configure({scene:'grmhd3d',paused:true});assert.equal(volume.observe().band,'radio');assert.equal(volume.observe().flight.r,40);
+assert.equal(volume.node('restore-preset').hidden,false);assert.equal(volume.node('restore-preset').textContent,'重置三维场景');
+for(const patch of [{model:'kerr',spin:.5},{band:'visible'},{charge:.2}]){
+ const before=JSON.stringify(volume.state());assert.throws(()=>volume.configure(patch));assert.equal(JSON.stringify(volume.state()),before);
+}
+volume.configure({falling:true,paused:false,speed:3});volume.advance(12);
+assert.equal(volume.observe().flight.stage,'inside');assert.equal(volume.observe().paused,true);
+volume.node('restore-preset').fire('click');assert.equal(volume.state().time,0);assert.equal(volume.observe().flight.r,40);
+volume.configure({paused:false});volume.advance(12);assert.equal(volume.observe().paused,true);near(volume.state().time,30);
+const finiteEvent=JSON.stringify(volume.state());assert.throws(()=>volume.configure({zoom:12}),/超出三维计算历史/);assert.equal(JSON.stringify(volume.state()),finiteEvent);
+volume.node('restore-preset').fire('click');assert.equal(volume.state().time,0);volume.configure({zoom:12});
+
+console.log('PASS: production idle drift, pointer/native gesture lifetimes, reduced-motion and pause; preset select/customize/revert/restore/reset, GRMHD controls and atomic interface rejection; paused journey and range release refinement; exposure drag remains display-only; journey resume keeps its calibrated lens; orbital scene metric locks, pause/resume, replay and reduced motion.');

@@ -5,6 +5,7 @@
   // Unlike the previous outgoing chart this chart also supports infalling cameras.
   const dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0), add=(a,b,f=1)=>a.map((v,i)=>v+f*b[i]);
   const scale=(v,s)=>v.map(x=>x*s), clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+  const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
   function geometry(x,a=0,q=0,chart=1) {
     const a2=a*a,b=dot(x,x)-a2,root=Math.sqrt(b*b+4*a2*x[2]*x[2]);
     const r=Math.sqrt(Math.max((b+root)/2,1e-24)),r2=r*r,d=r2*r2+a2*x[2]*x[2];
@@ -75,22 +76,31 @@
     const dr=[(r*x[0]+to*a*x[1])/D,(r*x[1]-to*a*x[0])/D,ct],dt=[x[0]*ct/st,x[1]*ct/st,-r*st];
     return {position:x,vector:[...add(add(scale(dr,ur),dt,uth),[-x[1],x[0],0],up),v[3]+(to-from)*(2*r-q*q)/delta*ur]};
   }
-  function observer(a=0,q=0,tilt=18,r=80,kind="static",yaw=0,chart=1) {
+  function observer(a=0,q=0,tilt=18,r=80,kind="static",yaw=0,chart=1,orbit=null) {
     // The azimuthal chart integral is anchored at the observer radius, matching
     // the shader's point/vector conversions (chartIntegral uses uDistance there).
     // The shift is exactly zero at this radius, so the camera and tetrad are
     // unchanged; the anchor only makes changeChart agree with the shader when it
     // is evaluated at any other radius.
-    if(chart===-1){const base=observer(a,q,tilt,r,kind,yaw,1),converted=changeChart(base.position,base.u,a,q,1,-1,r);return {...base,position:converted.position,u:converted.vector,basis:base.basis.map(v=>changeChart(base.position,v,a,q,1,-1,r).vector),g:geometry(converted.position,a,q,-1),chart:-1};}
-    const angle=tilt*Math.PI/180,radial=Math.cos(angle),position=[(r*Math.sin(yaw)+a*Math.cos(yaw))*radial,(-r*Math.cos(yaw)+a*Math.sin(yaw))*radial,r*Math.sin(angle)];
+    if(chart===-1){const base=observer(a,q,tilt,r,kind,yaw,1,orbit),converted=changeChart(base.position,base.u,a,q,1,-1,r);return {...base,position:converted.position,u:converted.vector,basis:base.basis.map(v=>changeChart(base.position,v,a,q,1,-1,r).vector),g:geometry(converted.position,a,q,-1),chart:-1};}
+    const angle=tilt*Math.PI/180,radial=Math.cos(angle),initial=[Math.sin(yaw)*radial,-Math.cos(yaw)*radial,Math.sin(angle)],azimuth=[Math.cos(yaw),Math.sin(yaw),0];
+    // Schwarzschild spherical symmetry lets us rotate an equatorial geodesic's
+    // position AND velocity into an inclined orbital plane. Holding latitude
+    // fixed while adding azimuth would describe an accelerated observer.
+    const phase=orbit?.phase??0,direction=orbit?add(scale(initial,Math.cos(phase)),azimuth,Math.sin(phase)):initial;
+    const tangent=orbit?add(scale(azimuth,Math.cos(phase)),initial,-Math.sin(phase)):azimuth;
+    const position=orbit?scale(direction,r):[(r*Math.sin(yaw)+a*Math.cos(yaw))*radial,(-r*Math.cos(yaw)+a*Math.sin(yaw))*radial,r*Math.sin(angle)];
     const g=geometry(position,a,q);
-    const u=kind==="infall"?infall(position,a,q):[0,0,0,1/Math.sqrt(1-g.f)];
+    const motion=orbit?infall([r,0,0],0,0,orbit.energy,orbit.angularMomentum):null;
+    let u;
+    if(motion)u=[...add(scale(direction,motion[0]),tangent,motion[1]),motion[3]];
+    else u=kind==="infall"?infall(position,a,q):[0,0,0,1/Math.sqrt(1-g.f)];
     if(!u.every(Number.isFinite)||Math.abs(metricDot(u,u,g)+1)>1e-7)throw new Error("Observer must be future timelike");
-    const candidates=[[Math.cos(yaw),Math.sin(yaw),0,0],[-Math.sin(yaw)*Math.sin(angle),Math.cos(yaw)*Math.sin(angle),Math.cos(angle),0],[Math.sin(yaw)*Math.cos(angle),-Math.cos(yaw)*Math.cos(angle),Math.sin(angle),0]];
+    const candidates=orbit?[[...tangent,0],[-Math.sin(yaw)*Math.sin(angle),Math.cos(yaw)*Math.sin(angle),radial,0],[...direction,0]]:[[Math.cos(yaw),Math.sin(yaw),0,0],[-Math.sin(yaw)*Math.sin(angle),Math.cos(yaw)*Math.sin(angle),Math.cos(angle),0],[Math.sin(yaw)*Math.cos(angle),-Math.cos(yaw)*Math.cos(angle),Math.sin(angle),0]];
     const basis=[];
     for(const raw of candidates){let v=add(raw,u,metricDot(raw,u,g));for(const p of basis)v=add(v,p,-metricDot(v,p,g));v=scale(v,1/Math.sqrt(metricDot(v,v,g)));basis.push(v);}
-    // The forward leg points towards decreasing radius, with the transported
-    // up/right legs held by the observer's local orthonormal frame.
+    // Center-locked framing: project the local right/up/outward directions into
+    // the observer's rest space, then point the forward leg inward.
     basis[2]=scale(basis[2],-1);
     return {position,u,basis,a,q,r,kind,g,chart:1};
   }
@@ -135,6 +145,11 @@
     const dg=Array.from({length:3},(_,j)=>Array.from({length:4},(_,m)=>Array.from({length:4},(_,n)=>g.df[j]*l[m]*l[n]+g.f*((m<3?g.dn[m][j]:0)*l[n]+l[m]*(n<3?g.dn[n][j]:0)))));
     const cov=Array.from({length:4},(_,m)=>-.5*(k.slice(0,3).reduce((s,v,j)=>s+v*dg[j][m].reduce((t,w,n)=>t+w*vector[n],0),0)+vector.slice(0,3).reduce((s,v,j)=>s+v*dg[j][m].reduce((t,w,n)=>t+w*k[n],0),0)-(m<3?dg[m].reduce((s,row,i)=>s+k[i]*dot(row,vector),0):0)));
     return raise(cov,g);
+  }
+  function schwarzschildScreen(x,p,chart=1){
+    const angular=cross(x,p),length=Math.hypot(...angular);if(length*length<=1e-16)return null;
+    const normal=[...scale(angular,1/length),0],g=geometry(x,0,0,chart),raw=[...cross(normal,p),0];
+    return [normal,scale(raw,1/Math.sqrt(metricDot(raw,raw,g)))];
   }
   const glsl=`
     float rayChart;
@@ -194,5 +209,5 @@
       return raise4(-.5*(first+second-last),m);
     }
   `;
-  globalThis.BlackHoleRelativity=Object.freeze({dot,add,scale,clamp,geometry,metricDot,lower,raise,horizon,circular,isco,inflowConstants,infall,circularVelocity,chartIntegrals,changeChart,observer,initialRay,derivative,advance,trace,connectionTransport,glsl});
+  globalThis.BlackHoleRelativity=Object.freeze({dot,add,scale,clamp,geometry,metricDot,lower,raise,horizon,circular,isco,inflowConstants,infall,circularVelocity,chartIntegrals,changeChart,observer,initialRay,derivative,advance,trace,connectionTransport,schwarzschildScreen,glsl});
 })();

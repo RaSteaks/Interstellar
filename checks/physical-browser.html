@@ -8,15 +8,18 @@
 // are used for verification without becoming part of the published product.
 window.runPhysicalCase=async function(options={}){
  const scene=options.scene||"quasar",preset=BlackHoleAstrophysics.scenes[scene];
- const state={scene,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:"static",display:"intensity",yaw:0,drift:0,time:0,viewZoom:1,zoom:1,paused:true,density:4096,exposure:1,...options};
- const canvas=document.getElementById("cosmos");window.currentEngine?.dispose();
+ const reuse=options.reuse===true&&window.currentEngine;
+ const initial={scene,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:"static",display:"intensity",yaw:0,drift:0,time:0,viewZoom:1,zoom:1,paused:true,density:4096,exposure:1,flightRadius:null,flightLens:null,...options};
+ const state=reuse?Object.assign(window.caseState,initial):initial;
+ const canvas=document.getElementById("cosmos");if(!reuse)window.currentEngine?.dispose();
  // Explicit renderer verification options never enter the product configuration
  // validator: they fix budgets/domain/spectra for independent numerical oracles.
  // A numerical case samples pixel centers once. Progressive display averaging
  // has its own independent GPU checks and must not move this oracle's rays.
- const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:options.verification||{progressiveSamples:1},onNeedsFrame(){},onStatus(message){document.getElementById("report").textContent=message;}});window.currentEngine=engine;window.caseState=state;
+ const engine=reuse?window.currentEngine:BlackHolePhysicalRenderer.create({canvas,state,verification:options.verification||{progressiveSamples:1},onNeedsFrame(){},onDatasetReady(dataset,metadata){if(dataset==="grmhd3d")state.nativeObservationStart=metadata.observationStart;},onStatus(message){document.getElementById("report").textContent=message;}});
+ if(!engine)throw new Error("WebGL2 context or float-buffer support was lost");window.currentEngine=engine;window.caseState=state;
  engine.draw({width:640,height:400,scale:400*.028*state.viewZoom},0);
- if(preset.flow==="grmhd"){for(let i=0;i<100&&engine.metrics.dataStatus==="loading";i++)await new Promise(r=>setTimeout(r,100));engine.refine();engine.draw({width:640,height:400,scale:400*.028*state.viewZoom},0);}
+ if(BlackHoleAstrophysics.model(state).recorded){for(let i=0;i<600&&engine.metrics.dataStatus==="loading";i++)await new Promise(r=>setTimeout(r,100));engine.refine();engine.draw({width:640,height:400,scale:400*.028*state.viewZoom},0);}
  const image=engine.readback();let light=0,maximum=0,polarizationError=0,finite=true,captured=0,escaped=0,opaque=0;
  for(let i=0;i<image.radiance.length;i+=4){let value=image.radiance[i]+image.radiance[i+1]+image.radiance[i+2];light+=value;maximum=Math.max(maximum,value);for(let k=0;k<4;k++)finite&&=Number.isFinite(image.radiance[i+k])&&Number.isFinite(image.stokes[i+k]);polarizationError=Math.max(polarizationError,Math.hypot(image.stokes[i+1],image.stokes[i+2],image.stokes[i+3])-image.stokes[i]);if(image.diagnostic[i]===1)escaped++;if(image.diagnostic[i]===2)captured++;if(image.diagnostic[i]===3)opaque++;}
  let unfinishedRays=0,invalidRays=0,unfinishedRadiusMin=Infinity,unfinishedRadiusMax=0,negativeEnergyUnfinished=0;const camera=BlackHoleAstrophysics.camera(state,BlackHoleAstrophysics.model(state));

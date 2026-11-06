@@ -15,11 +15,11 @@
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   // Startup and reset use an 8° disk elevation; named view presets stay independent.
   // Sampling changes resolution, never gas mass or optical depth.
-  const defaults={scene:"quasar",model:"kerr",spin:.65,charge:0,band:"visible",display:"intensity",observer:"infall",exposure:1,tilt:8,speed:1,density:128000,zoom:1,yaw:0,falling:false};
-  const state={...defaults,paused:reducedMotion.matches,time:0,viewZoom:defaults.zoom,reducedMotion:reducedMotion.matches,drift:0,flightRadius:null,flightLens:null,waitingForData:false};
+  const defaults={scene:"quasar",model:"kerr",spin:.65,charge:0,band:"visible",display:"intensity",observer:"infall",look:"flight",exposure:1,tilt:8,speed:1,density:128000,zoom:1,yaw:0,falling:false};
+  const state={...defaults,paused:reducedMotion.matches,time:0,viewZoom:defaults.zoom,reducedMotion:reducedMotion.matches,drift:0,flightRadius:null,flightLens:null,waitingForData:false,nativeObservationStart:null};
   const fields=Object.fromEntries(["spin","charge","tilt","speed","density","zoom","exposure"].map(key=>[key,document.getElementById(key)]));
   // The scene selector has its own ID; #scene is the existing canvas container.
-  const choices=Object.fromEntries(["scene","band","display","observer"].map(key=>[key,document.getElementById(key==="scene"?"scene-choice":key)]));
+  const choices=Object.fromEntries(["scene","band","display","observer","look"].map(key=>[key,document.getElementById(key==="scene"?"scene-choice":key)]));
   let renderer;
   let frame = 0;
   let lastTime = 0;
@@ -72,7 +72,9 @@
 
   // The physical path integrates evolving fluid emission along the entire ray.
   function createWebGLRenderer() {
-    const engine=globalThis.BlackHolePhysicalRenderer.create({canvas,state,onNeedsFrame:requestRender,onStatus:message=>{status.textContent=message;}});
+    const engine=globalThis.BlackHolePhysicalRenderer.create({canvas,state,onNeedsFrame:requestRender,onStatus:message=>{status.textContent=message;},onDatasetReady(dataset,metadata){
+      if(dataset==="grmhd3d"&&astrophysics.model(state).dataset===dataset)state.nativeObservationStart=metadata.observationStart;
+    }});
     return engine && {...engine,draw:seconds=>engine.draw(size,seconds)};
   }
 
@@ -175,25 +177,28 @@
     frame=0;
     // Hidden-page suspension and bounded elapsed time avoid jumps after returning to the page.
     const elapsed=Math.max(0,Math.min((now-lastTime)/1000,.05));
-    const movie=astrophysics.scenes[state.scene].flow==="grmhd",ready=!movie||renderer.metrics?.dataStatus==="ready",availableTime=renderer.metrics?.latestSimulationTime??renderer.metrics?.historyEndTime??800,continuationStatus=renderer.metrics?.continuationStatus,terminalFallback=movie&&(continuationStatus==="unavailable"||continuationStatus==="failed");
+    const observationModel=astrophysics.model(state),movie=observationModel.recorded,dataLabel=observationModel.flow==="grmhd3d"?"三维 GRMHD":"热流",ready=!movie||renderer.metrics?.dataStatus==="ready",availableTime=renderer.metrics?.latestSimulationTime??renderer.metrics?.historyEndTime??800,continuationStatus=renderer.metrics?.continuationStatus,terminalFallback=movie&&["unavailable","failed","finite-3d"].includes(continuationStatus);
+    let terminalMessage="持续求解已停止，已暂停在最后有效画面。";
+    if(continuationStatus==="unavailable")terminalMessage="持续求解不可用，已暂停在有限片段末时刻。";
+    else if(continuationStatus==="finite-3d")terminalMessage="已到三维计算历史末时刻；请继续运行独立求解器并更新快照。";
     let flight=renderer.physical?astrophysics.camera(state,astrophysics.model(state)):navigation.view(state.viewZoom,state.reducedMotion);
     if(!state.paused&&!document.hidden&&ready){
       if(state.falling){
-        const m=astrophysics.model(state),candidateRadius=astrophysics.advanceFall(state.flightRadius,m,state.tilt,elapsed*state.speed*8),candidateCamera=astrophysics.camera({...state,flightRadius:candidateRadius},m),candidateTime=350+state.time*8+candidateCamera.coordinateTime;
+        const m=astrophysics.model(state),candidateRadius=astrophysics.advanceFall(state.flightRadius,m,state.tilt,elapsed*state.speed*8),candidateCamera=astrophysics.camera({...state,flightRadius:candidateRadius},m),candidateTime=astrophysics.observationTime(state,m,candidateCamera);
         if(movie&&candidateTime>availableTime+1e-6){
-          const budget=Math.max(0,availableTime-350-state.time*8);let lo=astrophysics.minimumRadius(m,"infall"),hi=m.initialObserverDistance;
+          const budget=Math.max(0,availableTime-astrophysics.observationStart(state,m)-state.time*8);let lo=astrophysics.minimumRadius(m,"infall"),hi=m.initialObserverDistance;
           for(let i=0;i<28;i++){const radius=(lo+hi)/2,camera=astrophysics.camera({...state,flightRadius:radius},m);if(camera.coordinateTime>budget)lo=radius;else hi=radius;}
           state.flightRadius=(lo+hi)/2;state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);state.waitingForData=!terminalFallback;
           // A failed continuation has no future snapshot to wait for. Stop the
           // journey at the last valid event instead of pinning free fall forever.
-          if(terminalFallback){state.falling=false;state.paused=true;updateUI(continuationStatus==="unavailable"?"持续求解不可用，已暂停在有限片段末时刻。":"持续求解已停止，已暂停在最后有效画面。");}
+          if(terminalFallback){state.falling=false;state.paused=true;updateUI(terminalMessage);}
         } else {
           state.flightRadius=candidateRadius;state.zoom=state.viewZoom=astrophysics.zoomForRadius(state.flightRadius,m);state.waitingForData=false;
           if(state.flightRadius<=astrophysics.minimumRadius(m,"infall")+1e-9){state.falling=false;state.paused=true;updateUI("旅程已跨越外视界；暂停在当前观察位置，Esc 返回。");}
         }
       } else {
-        const nextTime=state.time+elapsed*state.speed,candidateTime=350+nextTime*8+flight.coordinateTime;
-        if(movie&&candidateTime>availableTime+1e-6){state.time=Math.max(state.time,(availableTime-350-flight.coordinateTime)/8);state.waitingForData=!terminalFallback;if(terminalFallback){state.falling=false;state.paused=true;updateUI(continuationStatus==="unavailable"?"持续求解不可用，已暂停在有限片段末时刻。":"持续求解已停止，已暂停在最后有效画面。");}}
+        const m=astrophysics.model(state),nextTime=state.time+elapsed*state.speed,candidateTime=astrophysics.observationTime({...state,time:nextTime},m,flight);
+        if(movie&&candidateTime>availableTime+1e-6){state.time=Math.max(state.time,(availableTime-astrophysics.observationStart(state,m)-flight.coordinateTime)/8);state.waitingForData=!terminalFallback;if(terminalFallback){state.falling=false;state.paused=true;updateUI(terminalMessage);}}
         else {state.time=nextTime;state.waitingForData=false;}
       }
     }
@@ -222,7 +227,7 @@
     }
     lastTime=now;renderer.draw(elapsed);
     updateTimingReadout();
-    if(movie&&renderer.metrics?.dataStatus!=="ready"){flightStatus.hidden=false;flightStatus.textContent=renderer.metrics?.dataStatus==="error"?"热流历史未能载入 · 展开控制选择热盘或刷新重试":"正在载入热流历史…";}
+    if(movie&&renderer.metrics?.dataStatus!=="ready"){flightStatus.hidden=false;flightStatus.textContent=renderer.metrics?.dataStatus==="error"?`${dataLabel}历史未能载入 · 展开控制选择热盘或刷新重试`:`正在载入${dataLabel}历史…`;}
     else if(movie&&renderer.metrics?.continuationStatus==="unavailable"){flightStatus.hidden=false;flightStatus.textContent="持续求解不可用 · 已回退到有限片段播放";}
     else if(movie&&renderer.metrics?.continuationStatus==="failed"){flightStatus.hidden=false;flightStatus.textContent="持续求解已停止 · 保留最后有效画面";}
     else if(movie&&state.waitingForData){flightStatus.hidden=false;flightStatus.textContent=`等待热流数据 · 最新完整状态 t=${(renderer.metrics?.latestSimulationTime??availableTime).toFixed(0)}`;}
@@ -232,7 +237,7 @@
     if(movie&&renderer.metrics?.movieEnded&&!state.paused){
       // Keep the terminal fallback finite: no future continuation means no
       // reason to schedule another animation frame at the same observation.
-      state.paused=true;state.falling=false;state.waitingForData=false;updateUI(continuationStatus==="unavailable"?"持续求解不可用，已暂停在有限片段末时刻。":"持续求解已停止，已暂停在最后有效画面。");
+      state.paused=true;state.falling=false;state.waitingForData=false;updateUI(terminalMessage);
     }
     // Interior observers still receive light. No cinematic opacity parks them.
     if((moving||!state.paused)&&!document.hidden&&!contextLost&&!frame)frame=requestAnimationFrame(animate);
@@ -276,30 +281,44 @@
   }
   function updateSolverReadout(recorded,metrics={}) {
     const readout=document.querySelector("#solver-readout");readout.hidden=!recorded;if(!recorded)return;
-    const stateLabel={loading:"初始化",ready:"持续求解",computing:"计算中",backpressure:"等待缓存消费",paused:"求解暂停",unavailable:"有限片段回退",failed:"求解失败"}[metrics.continuationStatus]||"持续求解准备中";
+    const stateLabel={loading:"初始化",ready:"持续求解",computing:"计算中",backpressure:"等待缓存消费",paused:"求解暂停",unavailable:"有限片段回退",failed:"求解失败","finite-3d":"全局三维 GRMHD 历史"}[metrics.continuationStatus]||"持续求解准备中";
     document.querySelector("#solver-status").textContent=stateLabel;
-    document.querySelector("#solver-latest").textContent=`最新 t=${(metrics.latestSimulationTime??metrics.historyEndTime??800).toFixed(0)}`;
-    document.querySelector("#solver-observation").textContent=`观测 t=${(metrics.observationTime??metrics.simulationTime??350).toFixed(0)}`;
-    document.querySelector("#solver-rate").textContent=`${(metrics.solverStepRate??0).toFixed(1)} GM/c³/s`;
-    document.querySelector("#solver-history").textContent=metrics.historyMissing?"光路历史缺失 · 仅使用缓存窗口":"历史完整";
+    const ready=metrics.dataStatus==="ready";
+    document.querySelector("#solver-grid").textContent=ready?`${metrics.grmhdResolution.join(" × ")} · ${metrics.grmhdFrames} 个计算快照`:"网格与历史待校验";
+    document.querySelector("#solver-latest").textContent=ready?`最新 t=${metrics.latestSimulationTime.toFixed(0)}`:"等待计算数据";
+    document.querySelector("#solver-observation").textContent=ready?`观测 t=${(metrics.observationTime??metrics.simulationTime??350).toFixed(0)}`:"观测时刻待选定";
+    document.querySelector("#solver-rate").textContent=metrics.continuationStatus==="finite-3d"?"独立原生求解器":`${(metrics.solverStepRate??0).toFixed(1)} GM/c³/s`;
+    document.querySelector("#solver-history").textContent=metrics.continuationStatus==="finite-3d"?"有限三维快照 · 不外推未计算时刻":metrics.historyMissing?"光路历史缺失 · 仅使用缓存窗口":"历史完整";
     if(metrics.continuationStatus==="unavailable")document.querySelector("#solver-history").textContent="有限片段回退 · 不宣称持续求解";
     const diagnostics=metrics.solverDiagnostics;
     document.querySelector("#solver-diagnostics").textContent=diagnostics?.length>=8?`质量 ${(diagnostics[4]*100).toFixed(3)}% · 内能 ${(diagnostics[5]*100).toFixed(3)}% · 坐标 divB~${diagnostics[6].toExponential(1)} · u漂移 ${diagnostics[7].toExponential(1)}`:"守恒与约束诊断等待中";
+    if(metrics.nativeDiagnostics)document.querySelector("#solver-diagnostics").textContent=`原生 divB ${metrics.nativeDiagnostics.maxDivB.toExponential(1)} · 四速度误差 ${metrics.nativeDiagnostics.maxVelocityNormError.toExponential(1)}`;
     const renderState=document.querySelector("#render-state");
     renderState.textContent=state.paused?"画面已暂停":state.waitingForData?"等待热流数据":metrics.continuationStatus==="computing"?"持续求解中":"相对论辐射成像";
   }
   function snapshot() {
     const model=renderer.physical?astrophysics.model(state):physics.model(state);
-    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,falling:state.falling,waitingForData:state.waitingForData,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count(),passes:renderer.metrics?.progressiveSamples??1,targetPasses:renderer.metrics?.progressiveTarget??1,total:renderer.metrics?.progressiveRaySamples??renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,latestSimulationTime:renderer.metrics?.latestSimulationTime??null,observationTime:renderer.metrics?.observationTime??null,solverStepRate:renderer.metrics?.solverStepRate??0,solverDiagnostics:renderer.metrics?.solverDiagnostics??null,historyMissing:Boolean(renderer.metrics?.historyMissing),timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
+    return {scene:state.scene,model:state.model,spin:model.spin,charge:model.charge||0,isco:model.isco,mass:model.mass,accretionRate:model.mdot,band:state.band,display:state.display,observer:state.observer,look:state.look,falling:state.falling,waitingForData:state.waitingForData,exposure:state.exposure,tilt:state.tilt,speed:state.speed,density:state.density,samples:{budget:state.density,actual:renderer.count(),passes:renderer.metrics?.progressiveSamples??1,targetPasses:renderer.metrics?.progressiveTarget??1,total:renderer.metrics?.progressiveRaySamples??renderer.count()},zoom:state.zoom,flight:renderer.physical?astrophysics.camera(state,model):navigation.view(state.viewZoom,state.reducedMotion),paused:state.paused,controlsExpanded:shell.open,presetCustomized:isPresetCustomized(model),computationalRadius:renderer.physical?model.computationalRadius:null,initialObserverDistance:renderer.physical?model.initialObserverDistance:null,latestSimulationTime:renderer.metrics?.latestSimulationTime??null,observationTime:renderer.metrics?.observationTime??null,solverStepRate:renderer.metrics?.solverStepRate??0,solverDiagnostics:renderer.metrics?.solverDiagnostics??null,historyMissing:Boolean(renderer.metrics?.historyMissing),timingSource:renderer.metrics?.timingSource||(renderer.physical?"pending":"canvas-projection"),render:renderer.metrics?{...renderer.metrics}:{mode:"canvas-projection"}};
   }
   function updateUI(message) {
     const model=renderer.physical?astrophysics.model(state):physics.model(state);
-    const recorded=renderer.physical&&model.flow==="grmhd";
+    const recorded=renderer.physical&&model.recorded,volume=recorded&&model.flow==="grmhd3d";
+    const orbital=renderer.physical&&Boolean(model.orbit);
     const customized=isPresetCustomized(model);
     document.querySelector("#preset-customized").hidden=!customized;
     document.querySelector("#preset-customized-help").hidden=!customized;
-    document.querySelector("#restore-preset").hidden=!customized;
-    document.querySelector("#physics-help").textContent=recorded?"模拟数据固定为克尔时空，a=0.9375、Q=0；请先选择热盘预设再调整时空。":"调整当前场景预设的物理参数。";
+    document.querySelector("#restore-preset").hidden=!customized&&!volume;
+    document.querySelector("#restore-preset").textContent=volume?"重置三维场景":"恢复预设";
+    let metricHelp="调整当前场景预设的物理参数。";
+    if(volume)metricHelp="三维数据固定为史瓦西时空，a=0、Q=0；选择其它热盘预设可调整时空。";
+    else if(recorded)metricHelp="模拟数据固定为克尔时空，a=0.9375、Q=0；请先选择热盘预设再调整时空。";
+    else if(orbital)metricHelp="绕行坠落轨迹采用无自旋、无电荷的史瓦西时空；选择其它热盘预设可切换时空。";
+    document.querySelector("#physics-help").textContent=metricHelp;
+    document.querySelector("#preset-help").textContent=volume?"原生求解器计算全局三维状态；网页实时追踪光线，计算历史不循环。":orbital?"实时计算轨迹、弯曲光路与转动发光结构；展开“镜头与播放”开始旅程。":"载入一组物理参数、波段与初始视角。";
+    const observerHelp=orbital?"E=1、L=3.995 · 轨道倾角决定飞行平面；回放速度缩放固有时间。":"按固有时间沿自由落体轨迹移动，计算运动像差与频移。";
+    document.querySelector("#observer-help").textContent=state.observer==="static"?"静止观察仅限能层以外；启动旅程会切换到自由落体。":observerHelp;
+    document.querySelector("#look-control").hidden=!orbital||state.observer!=="infall";
+    document.querySelector('label[for="tilt"]').textContent=orbital&&state.observer==="infall"?"轨道倾角":"盘面仰角";
     const spinBound=Math.sqrt(Math.max(0,.998**2-(model.charge||0)**2));
     fields.spin.min=String(-spinBound);fields.spin.max=String(spinBound);
     fields.charge.max=String(Math.min(.95,Math.sqrt(Math.max(0,.998**2-model.spin**2))));
@@ -325,8 +344,9 @@
     document.querySelector("#isco-value").textContent=`${model.isco.toFixed(2)} r_g`;
     document.querySelectorAll("[data-model]").forEach(button=>{
       button.setAttribute("aria-pressed",String(button.dataset.model===state.model));
-      button.disabled=recorded&&button.dataset.model!=="kerr"||!renderer.physical&&["reissner","kerr-newman"].includes(button.dataset.model);
-      button.title=recorded&&button.dataset.model!=="kerr"?"模拟数据固定为克尔时空，a=0.9375、Q=0":"";
+      const incompatible=recorded&&button.dataset.model!==astrophysics.scenes[state.scene].model||orbital&&button.dataset.model!=="schwarzschild";
+      button.disabled=incompatible||!renderer.physical&&["reissner","kerr-newman"].includes(button.dataset.model);
+      button.title=incompatible?metricHelp:"";
     });
     document.querySelector("#computational-radius-value").textContent=renderer.physical?`${model.computationalRadius} r_g`:"投影示意";
     document.querySelector("#observer-distance-value").textContent=renderer.physical?`${model.initialObserverDistance} r_g`:"投影示意";
@@ -340,14 +360,17 @@
     document.querySelector("#pause-icon").setAttribute("d",state.paused?"M6 4l9 6-9 6Z":"M7 4v12M13 4v12");
     updateSampleReadout();
     document.querySelector("#render-state").textContent=renderer.kind==="canvas"?"兼容示意":state.paused?"画面已暂停":"相对论辐射成像";
-    const fallButton=document.querySelector("#fall");fallButton.disabled=!renderer.physical||state.reducedMotion;fallButton.setAttribute("aria-pressed",String(state.falling));fallButton.textContent=state.falling?"停止自由落体旅程":"开始自由落体旅程";
+    const fallButton=document.querySelector("#fall"),completed=orbital&&Number.isFinite(state.flightRadius)&&state.flightRadius<=astrophysics.minimumRadius(model,"infall")+1e-9;
+    fallButton.disabled=!renderer.physical||state.reducedMotion;fallButton.setAttribute("aria-pressed",String(state.falling));
+    const journey=orbital?"绕行坠落旅程":"自由落体旅程",start=completed?"重播":"开始";
+    fallButton.textContent=state.falling?`停止${journey}`:`${start}${journey}`;
     updateSolverReadout(recorded,renderer.metrics);if(message)status.textContent=message;
   }
   // Selection and restoration use exactly the same initial physics/camera
   // patch; only an explicit configure call can override those preset values.
   function presetSettings(sceneId) {
     const preset=astrophysics.scenes[sceneId];
-    return {scene:sceneId,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:preset.observer||defaults.observer,zoom:defaults.zoom,yaw:defaults.yaw,falling:false,time:0};
+    return {scene:sceneId,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:preset.observer||defaults.observer,look:defaults.look,zoom:defaults.zoom,yaw:defaults.yaw,falling:false,time:0};
   }
   function applySettings(settings,message) {
     // Check the entire update before changing state so failed agent input is atomic.
@@ -362,6 +385,7 @@
       else if(key==="band") {if(!["visible","xray","radio","bolometric"].includes(value))throw new Error("Unsupported band");}
       else if(key==="display") {if(!["intensity","linear","circular","accuracy"].includes(value))throw new Error("Unsupported display");}
       else if(key==="observer") {if(!["static","infall"].includes(value))throw new Error("Unsupported observer");}
+      else if(key==="look") {if(!["flight","center","outward"].includes(value))throw new Error("Unsupported viewing direction");}
       else if(key==="paused") {if(typeof value!=="boolean")throw new Error("paused must be a boolean");}
       else if(key==="falling") {if(typeof value!=="boolean")throw new Error("falling must be a boolean");}
       else if(key==="yaw") {if(typeof value!=="number"||!Number.isFinite(value))throw new Error("yaw must be finite");}
@@ -375,14 +399,20 @@
     if(candidate.spin**2+candidate.charge**2>.998**2+1e-12)throw new Error("Spin and charge must describe a subextremal black hole");
     // Reject incompatible metrics before touching any state, including time,
     // camera and playback. Changing datasets always requires an explicit scene.
-    if(candidate.flow==="grmhd"&&(next.model!=="kerr"||next.spin!==.9375||next.charge!==0))throw new Error("模拟数据固定为克尔时空，a=0.9375、Q=0；请主动选择热盘预设后再修改。");
-    if(candidate.flow==="grmhd"&&next.band!=="radio")throw new Error("The recorded hot-flow model currently supports the 230 GHz band");
+    const source=astrophysics.scenes[next.scene];
+    if(candidate.recorded&&(next.model!==source.model||next.spin!==source.spin||next.charge!==source.charge))throw new Error("模拟数据的时空、自旋和电荷固定；请主动选择热盘预设后再修改。");
+    if(candidate.recorded&&next.band!=="radio")throw new Error("The recorded hot-flow model currently supports the 230 GHz band");
+    if(!candidate.recorded&&candidate.orbit&&(next.model!=="schwarzschild"||next.spin!==0||next.charge!==0))throw new Error("绕行坠落轨迹固定为史瓦西时空，a=0、Q=0；请先选择其它热盘预设再调整时空。");
     if(patch.falling&&(!renderer.physical||state.reducedMotion))throw new Error("Automatic free fall requires WebGL2 and motion enabled");
     if(!renderer.physical&&(["reissner","kerr-newman"].includes(next.model)||["scene","band","display","observer","charge"].some(key=>Object.hasOwn(settings,key)&&next[key]!==state[key])))throw new Error("Physical observation modes require WebGL2");
     // Only an actual change of a camera field resets the journey. Key presence is
     // not enough: requesting free fall always re-states observer=infall, and that
     // repeated value must not discard an already calibrated lens.
     const cameraChange=["scene","model","observer","spin","charge","zoom","yaw","tilt"].some(key=>Object.hasOwn(patch,key)&&patch[key]!==state[key]);
+    if(candidate.flow==="grmhd3d"&&state.scene===next.scene&&renderer.metrics?.continuationStatus==="finite-3d"&&cameraChange){
+      const selected={...next,viewZoom:next.zoom,flightRadius:null};
+      if(astrophysics.observationTime(selected,candidate)>renderer.metrics.latestSimulationTime+1e-6)throw new Error("所选观察事件超出三维计算历史；请先重置三维场景。");
+    }
     const resuming=patch.falling===true&&!cameraChange&&Number.isFinite(state.flightRadius)&&Number.isFinite(state.flightLens);
     if(cameraChange){state.falling=false;state.flightRadius=null;state.flightLens=null;}
     const becamePaused=!state.paused&&next.paused;
@@ -415,7 +445,14 @@
     const top=button.dataset.preset==="top";applySettings({tilt:top?78:18,zoom:top ? .9 : 1,yaw:0},top?"已切换至俯瞰视角。":"已切换至电影视角。");
   }));
   document.querySelector("#pause").addEventListener("click",()=>applySettings({paused:!state.paused},state.paused?"模拟继续播放。":"画面已暂停。"));
-  document.querySelector("#fall").addEventListener("click",()=>applySettings({falling:!state.falling,paused:state.falling},state.falling?"旅程已停止，暂停在当前观察位置。":"沿当前自由落体轨迹接近，操作镜头可停止旅程。"));
+  document.querySelector("#fall").addEventListener("click",()=>{
+    const model=astrophysics.model(state),replay=model.orbit&&Number.isFinite(state.flightRadius)&&state.flightRadius<=astrophysics.minimumRadius(model,"infall")+1e-9;
+    // Re-select through the canonical preset path so replay also resets the
+    // observation clock and lens, while keeping the chosen orbital plane.
+    const patch=replay?{scene:state.scene,tilt:state.tilt,yaw:state.yaw,band:state.band,look:state.look}:{};
+    const description=model.orbit?"沿带角动量的自由落体轨迹绕行并坠入，操作镜头可停止旅程。":"沿当前自由落体轨迹接近，操作镜头可停止旅程。";
+    applySettings({...patch,falling:!state.falling,paused:state.falling},state.falling?"旅程已停止，暂停在当前观察位置。":description);
+  });
   document.querySelector("#restore-preset").addEventListener("click",()=>{gestures.cancel();applySettings({scene:state.scene},"已恢复场景预设的物理参数、波段与初始视角。");});
   document.querySelector("#reset").addEventListener("click",()=>{gestures.cancel();applySettings({...defaults},"观测参数已重置。");});
 
@@ -477,7 +514,7 @@
     const lifecycle=new AbortController();
     const register=tool=>{try{Promise.resolve(modelContext.registerTool(tool,{signal:lifecycle.signal})).catch(()=>{});}catch{/* Experimental registry support is optional. */}};
     register({name:"get_observation",title:"读取观测参数",description:"Read physical scene, spacetime, observer, band, actual ray samples and renderer convergence.",inputSchema:{type:"object",properties:{},additionalProperties:false},annotations:{readOnlyHint:true,untrustedContentHint:false},execute(input){if(input&&Object.keys(input).length)throw new Error("No arguments accepted");return snapshot();}});
-    register({name:"configure_observation",title:"调整黑洞观测",description:"Configure spacetime, physical scene, observing band and timelike observer. Density is the target ray-sampling budget, not gas density. Falling starts/stops a proper-time geodesic journey. Controls stay collapsed.",inputSchema:{type:"object",properties:{scene:{type:"string",enum:Object.keys(astrophysics.scenes)},model:{type:"string",enum:["schwarzschild","kerr","reissner","kerr-newman"]},spin:{type:"number",minimum:-.998,maximum:.998},charge:{type:"number",minimum:0,maximum:.95},band:{type:"string",enum:["visible","xray","radio","bolometric"]},display:{type:"string",enum:["intensity","linear","circular","accuracy"]},observer:{type:"string",enum:["static","infall"]},falling:{type:"boolean"},exposure:{type:"number",minimum:.05,maximum:5},tilt:{type:"number",minimum:-89,maximum:89},speed:{type:"number",minimum:.1,maximum:3},density:{type:"integer",minimum:Number(fields.density.min),maximum:Number(fields.density.max)},zoom:{type:"number",minimum:navigation.limits.min,maximum:navigation.limits.max},paused:{type:"boolean"}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute(input){if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Expected an observation object");return applySettings(input,"观测参数已更新。");}});
+    register({name:"configure_observation",title:"调整黑洞观测",description:"Configure spacetime, physical scene, observing band and timelike observer. Density is the target ray-sampling budget, not gas density. Falling starts/stops a proper-time geodesic journey; look changes orbital camera attitude without changing its motion. Controls stay collapsed.",inputSchema:{type:"object",properties:{scene:{type:"string",enum:Object.keys(astrophysics.scenes)},model:{type:"string",enum:["schwarzschild","kerr","reissner","kerr-newman"]},spin:{type:"number",minimum:-.998,maximum:.998},charge:{type:"number",minimum:0,maximum:.95},band:{type:"string",enum:["visible","xray","radio","bolometric"]},display:{type:"string",enum:["intensity","linear","circular","accuracy"]},observer:{type:"string",enum:["static","infall"]},look:{type:"string",enum:["flight","center","outward"]},falling:{type:"boolean"},exposure:{type:"number",minimum:.05,maximum:5},tilt:{type:"number",minimum:-89,maximum:89},speed:{type:"number",minimum:.1,maximum:3},density:{type:"integer",minimum:Number(fields.density.min),maximum:Number(fields.density.max)},zoom:{type:"number",minimum:navigation.limits.min,maximum:navigation.limits.max},paused:{type:"boolean"}},additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false},execute(input){if(!input||typeof input!=="object"||Array.isArray(input))throw new Error("Expected an observation object");return applySettings(input,"观测参数已更新。");}});
     window.addEventListener("pagehide",event=>{if(!event.persisted)lifecycle.abort();});
   }
   const observer=new ResizeObserver(resize);observer.observe(scene);

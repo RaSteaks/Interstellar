@@ -1,0 +1,93 @@
+--- a/src/pgen/gr_torus.cpp
++++ b/src/pgen/gr_torus.cpp
+@@ -11,6 +11,8 @@
+ // C++ headers
+ #include <algorithm>  // max, min
+ #include <cmath>      // abs, acos, atan2, cos, exp, hypot, log, NAN, pow, sin, sqrt
++#include <cstdio>
++#include <limits>
+ #include <cstdlib>    // exit (needed for defs.hpp)
+ #include <cstring>    // strcmp
+ #include <iostream>   // cout (needed for defs.hpp), endl
+@@ -46,6 +48,10 @@
+ Real HistorySum(MeshBlock *pmb, int iout);
+ 
+ // File declarations
++extern bool interstellar_eos_audit_active;
++extern int interstellar_eos_audit_fail_after;
++extern int interstellar_eos_audit_calls;
++
+ namespace {
+ void GetKerrSchildCoordinates(Real x1, Real x2, Real x3, Real *p_r, Real *p_th,
+     Real *p_ph);
+@@ -649,6 +655,70 @@
+ //     1,k,j,i: pmag (fluid-frame magnetic pressure, if magnetic fields enabled)
+ 
+ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
++
++  // Test-only execution of the real GRMHD primitive-recovery caller.
++  if (gid == 0) {
++    const int n1 = block_size.nx1 + 2*NGHOST;
++    const int n2 = block_size.nx2 + 2*NGHOST;
++    const int n3 = block_size.nx3 + 2*NGHOST;
++    const int ii = is + block_size.nx1/2, jj = js + block_size.nx2/2, kk = ks + 1;
++    const Real radius = pcoord->x1v(ii), theta = pcoord->x2v(jj);
++    const Real alpha = 1.0/std::sqrt(1.0 + 2.0*m/radius);
++    FaceField audit_faces(n3,n2,n1);
++    AthenaArray<Real> initial, backup, recovered, conserved, centered;
++    initial.NewAthenaArray(NHYDRO,n3,n2,n1);
++    backup.NewAthenaArray(NHYDRO,n3,n2,n1);
++    recovered.NewAthenaArray(NHYDRO,n3,n2,n1);
++    conserved.NewAthenaArray(NHYDRO,n3,n2,n1);
++    centered.NewAthenaArray(3,n3,n2,n1);
++    auto prepare = [&](Real rho, Real pressure, Real lorentz, Real normal_b) {
++      initial.ZeroClear(); backup.ZeroClear(); recovered.ZeroClear(); conserved.ZeroClear(); centered.ZeroClear();
++      audit_faces.x1f.ZeroClear(); audit_faces.x2f.ZeroClear(); audit_faces.x3f.ZeroClear();
++      const Real coordinate_b = normal_b/(alpha*radius);
++      audit_faces.x2f(kk,jj,ii) = audit_faces.x2f(kk,jj+1,ii) = coordinate_b;
++      initial(IDN,kk,jj,ii) = rho;
++      initial(IPR,kk,jj,ii) = pressure;
++      initial(IVZ,kk,jj,ii) = std::sqrt(lorentz*lorentz-1.0)/(radius*std::sin(theta));
++      backup(IDN,kk,jj,ii) = 1.0;
++      backup(IPR,kk,jj,ii) = 0.1;
++      pfield->CalculateCellCenteredField(audit_faces,centered,pcoord,ii,ii,jj,jj,kk,kk);
++      peos->PrimitiveToConserved(initial,centered,conserved,pcoord,ii,ii,jj,jj,kk,kk);
++      interstellar_eos_audit_calls = 0;
++      interstellar_eos_audit_fail_after = -1;
++      interstellar_eos_audit_active = true;
++    };
++    auto check = [&](const char *name, Real expected_rho, Real expected_pressure, Real expected_gamma, int expected_calls) {
++      Real ur = recovered(IVX,kk,jj,ii), uth = recovered(IVY,kk,jj,ii), uph = recovered(IVZ,kk,jj,ii);
++      Real actual_gamma = std::sqrt(1.0+(1.0+2.0*m/radius)*ur*ur+radius*radius*uth*uth+radius*radius*std::sin(theta)*std::sin(theta)*uph*uph);
++      Real rho = recovered(IDN,kk,jj,ii), pressure = recovered(IPR,kk,jj,ii);
++      Real error = std::max(std::abs(rho/expected_rho-1.0),std::max(std::abs(pressure/expected_pressure-1.0),std::abs(actual_gamma/expected_gamma-1.0)));
++      bool pass = std::isfinite(error) && error < 2.0e-8 && interstellar_eos_audit_calls == expected_calls;
++      std::fprintf(stderr,"EOS_AUDIT case=%s rho=%.17g expected_rho=%.17g pressure=%.17g expected_pressure=%.17g gamma=%.17g expected_gamma=%.17g calls=%d error=%.17g pass=%d\n",name,rho,expected_rho,pressure,expected_pressure,actual_gamma,expected_gamma,interstellar_eos_audit_calls,error,pass);
++      interstellar_eos_audit_active = false;
++      return pass;
++    };
++    bool passed = true;
++    // A truly nonphysical conserved state makes the actual inversion fail.
++    // Its unspecified outputs were poisoned by the test-only EOS patch.
++    prepare(1.0,0.1,1.0,2.0);
++    conserved(IEN,kk,jj,ii) = std::numeric_limits<Real>::quiet_NaN();
++    peos->ConservedToPrimitive(conserved,backup,audit_faces,recovered,centered,pcoord,ii,ii,jj,jj,kk,kk);
++    passed = check("first_failure",0.04,0.002,1.0,1) && passed;
++    // First inversion succeeds; the retry after floor injection is forced to
++    // fail, exercising the second failure branch of the same production caller.
++    prepare(0.001,1.0,3.0,20.0);
++    interstellar_eos_audit_fail_after = 1;
++    peos->ConservedToPrimitive(conserved,backup,audit_faces,recovered,centered,pcoord,ii,ii,jj,jj,kk,kk);
++    passed = check("retry_failure",4.0,0.2,1.0,2) && passed;
++    // Perpendicular B: gamma=3 -> ceiling2 changes b² from400/9 to400/4.
++    // Sigma<=100 therefore requires rho>=1, not the stale-gamma value0.8.
++    prepare(0.8,1.0,3.0,20.0);
++    backup(IDN,kk,jj,ii) = 0.8; backup(IPR,kk,jj,ii) = 1.0;
++    backup(IVZ,kk,jj,ii) = initial(IVZ,kk,jj,ii);
++    peos->ConservedToPrimitive(conserved,backup,audit_faces,recovered,centered,pcoord,ii,ii,jj,jj,kk,kk);
++    passed = check("velocity_ceiling",1.0,1.0,2.0,1) && passed;
++    std::exit(passed ? 0 : 42);
++  }
+   // Prepare scratch arrays
+   AthenaArray<Real> &g = ruser_meshblock_data[0];
+   AthenaArray<Real> &gi = ruser_meshblock_data[1];

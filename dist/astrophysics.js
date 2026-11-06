@@ -18,6 +18,10 @@
   const scenes=Object.freeze({
     // Re-selecting the initial scene restores the same 8° disk elevation as startup.
     quasar:{name:"类星体 · 光学热盘",mass:5e8,mdot:.015,spin:.65,charge:0,model:"kerr",band:"visible",flow:"thermal",tilt:8},
+    // A near-critical massive-particle capture, computed locally. This is an
+    // illustrative thin disk, not a reconstruction of the Galactic Center.
+    plunge:{name:"史瓦西 · 绕行坠落",mass:4.3e6,mdot:1e-4,spin:0,charge:0,model:"schwarzschild",band:"bolometric",flow:"thermal",tilt:18,observer:"infall",startRadius:80,diskOuterRadius:25,diskStructure:true,viewScale:.25,displayGain:.5,orbit:Object.freeze({energy:1,angularMomentum:3.995})},
+    grmhd3d:{name:"全局三维 GRMHD · 史瓦西",mass:4.3e6,mdot:1e-8,spin:0,charge:0,model:"schwarzschild",band:"radio",flow:"grmhd3d",dataset:"grmhd3d",outerRadius:64,tilt:18,observer:"infall",startRadius:40,observationStart:160,viewScale:.25,electronRatio:10,displayGain:8,orbit:Object.freeze({energy:1,angularMomentum:3.995})},
     stellar:{name:"恒星级 · X 射线热盘",mass:10,mdot:.12,spin:.8,charge:0,model:"kerr",band:"xray",flow:"thermal",tilt:18},
     m87:{name:"M87* · 射电热流与喷流",mass:6.5e9,mdot:2e-5,spin:.9375,charge:0,model:"kerr",band:"radio",flow:"grmhd",tilt:73,observer:"static",electronRatio:40,displayGain:8},
     sgrA:{name:"银河系中心 · 射电热流",mass:4.3e6,mdot:1e-8,spin:.9375,charge:0,model:"kerr",band:"radio",flow:"grmhd",tilt:35,observer:"static",electronRatio:10,displayGain:200},
@@ -32,12 +36,17 @@
     const scene=scenes[state.scene]||scenes.quasar;
     const kind=state.model||scene.model,a=["kerr","kerr-newman"].includes(kind)?state.spin??scene.spin:0;
     const q=["reissner","kerr-newman"].includes(kind)?state.charge??scene.charge:0;
-    // An explicit local override supports boundary convergence without adding
-    // a new configuration control or modifying the production preset.
-    const outer=scene.flow==="thermal"?R.clamp(computationalRadius,domain.initialRadius,domain.maximumRadius):40;
+    // Ordinary thermal scenes use the converged numerical domain. The orbital
+    // scene instead prescribes a finite physical disk, so its 80 rg observer
+    // starts outside the source rather than inside an extended glowing disk.
+    const outer=scene.flow==="thermal"?(scene.diskOuterRadius??R.clamp(computationalRadius,domain.initialRadius,domain.maximumRadius)):(scene.outerRadius??40);
     return cached("models",[state.scene,kind,a,q,outer].join(":"),()=>{
-      const h=R.horizon(a,q),rg=C.G*scene.mass*C.solarMass/C.c**2,initialObserverDistance=scene.flow==="thermal"?domain.observerFactor*outer:80;
-      return Object.freeze({...scene,model:kind,spin:a,charge:q,isco:R.isco(a,q),horizon:h.outer,innerHorizon:h.inner,outer,computationalRadius:outer,initialObserverDistance,skyRadius:initialObserverDistance*domain.skyFactor,rg,timeUnit:rg/C.c,
+      const h=R.horizon(a,q),rg=C.G*scene.mass*C.solarMass/C.c**2,initialObserverDistance=scene.startRadius??(scene.flow==="thermal"?domain.observerFactor*outer:80);
+      // A near-hole observer still needs the full emitting domain and a sky
+      // outside that domain; moving the camera must not shrink the source.
+      const sourceExtent=scene.flow==="thermal"?domain.observerFactor*outer:scene.flow==="grmhd3d"?2*outer:0;
+      const skyRadius=Math.max(initialObserverDistance,sourceExtent)*domain.skyFactor;
+      return Object.freeze({...scene,recorded:scene.flow==="grmhd"||scene.flow==="grmhd3d",model:kind,spin:a,charge:q,isco:R.isco(a,q),horizon:h.outer,innerHorizon:h.inner,outer,computationalRadius:outer,initialObserverDistance,skyRadius,rg,timeUnit:rg/C.c,
       // Dimensionless mdot uses L_Edd/(0.1 c²). Expose this convention in notes.
       massRate:scene.mdot*1.26e31*scene.mass/(.1*C.c**2)});
     });
@@ -180,13 +189,16 @@
       if(kind==="infall"){const speed=Math.sqrt(2/r);sine*=Math.sqrt(1-speed*speed)/(1+speed*Math.sqrt(1-sine*sine));}
       return r*sine/Math.sqrt(1-sine*sine);
     };
-    return critical(80)/critical(m.initialObserverDistance);
+    return critical(80)/critical(m.initialObserverDistance)*(m.viewScale??1);
   }
-  function radialRate(r,m,tilt){const ct=Math.sin(tilt*Math.PI/180);return -Math.sqrt((2*r-m.charge*m.charge)*(r*r+m.spin*m.spin))/(r*r+m.spin*m.spin*ct*ct);}
+  function radialRate(r,m,tilt){
+    if(m.orbit)return R.infall([r,0,0],0,0,m.orbit.energy,m.orbit.angularMomentum)[0];
+    const ct=Math.sin(tilt*Math.PI/180);return -Math.sqrt((2*r-m.charge*m.charge)*(r*r+m.spin*m.spin))/(r*r+m.spin*m.spin*ct*ct);
+  }
   function advanceFall(radius,m,tilt,properElapsed){
     const minimum=minimumRadius(m,"infall"),n=Math.max(1,Math.ceil(properElapsed/.025)),dt=properElapsed/n;let r=radius;
     // Integrate proper time, rather than animating a zoom curve. All samples
-    // follow the same E=1,L=0,Q=0 geodesic used for observer aberration.
+    // follow the same conserved quantities used for observer aberration.
     for(let i=0;i<n&&r>minimum;i++){const k1=radialRate(r,m,tilt),k2=radialRate(Math.max(minimum,r+dt*k1/2),m,tilt),k3=radialRate(Math.max(minimum,r+dt*k2/2),m,tilt),k4=radialRate(Math.max(minimum,r+dt*k3),m,tilt);r=Math.max(minimum,r+dt*(k1+2*k2+2*k3+k4)/6);}return r;
   }
   function zoomForRadius(r,m,kind="infall"){
@@ -197,10 +209,12 @@
     const zoom=state.viewZoom??state.zoom,progress=R.clamp(Math.log(Math.max(zoom,1.4)/1.4)/Math.log(12/1.4),0,1),travel=progress*progress*(3-2*progress);
     const minimum=minimumRadius(m,state.observer);
     const start=m.initialObserverDistance,distance=Number.isFinite(state.flightRadius)?R.clamp(state.flightRadius,minimum,start):start*Math.exp(Math.log(minimum/start)*travel);
-    const cameraKey=[m.spin,m.charge,start,m.skyRadius,state.tilt,state.observer,distance,progress,state.yaw||0,state.drift||0].join(":");
+    const cameraKey=[m.spin,m.charge,start,m.skyRadius,m.viewScale,m.orbit?.energy,m.orbit?.angularMomentum,state.look,state.tilt,state.observer,distance,progress,state.yaw||0,state.drift||0].join(":");
     return cached("cameras",cameraKey,()=>{
     let angle=0,properTime=0,coordinateTime=0;
-    if(state.observer==="infall"&&distance<start) {
+    if(state.observer==="infall"&&distance<start&&m.orbit){
+      ({angle,properTime,coordinateTime}=orbitalWorldline(distance,m));
+    } else if(state.observer==="infall"&&distance<start) {
       // Parameterize an E=1, L=0, Q=0 infall worldline by radius. The same
       // four-velocity determines camera aberration AND trajectory azimuth.
       const integral=cached("worldlines",[m.spin,m.charge,start,distance,state.tilt].join(":"),()=>{
@@ -219,9 +233,48 @@
     // KS is essential for an observer crossing the future horizon. Transform
     // the SAME observer/tetrad, rather than changing its physical velocity.
     const chart=distance>2.8?-1:1;
-    const yaw=(state.yaw||0)+(state.drift||0)+angle,view=R.observer(m.spin,m.charge,state.tilt,distance,state.observer,yaw,chart);
-    return {...view,progress,orbit:angle,properTime,coordinateTime,initialObserverDistance:start,skyRadius:m.skyRadius,framingScale:framingScale(m,state.observer),stage:distance<m.horizon?"inside":progress>.55?"approach":progress>0?"orbit":"observe",fade:0};
+    const orbit=m.orbit&&state.observer==="infall"?{...m.orbit,phase:angle}:null;
+    const yaw=(state.yaw||0)+(state.drift||0)+(orbit?0:angle),view=R.observer(m.spin,m.charge,state.tilt,distance,state.observer,yaw,chart,orbit);
+    // A prescribed camera attitude is separate from the observer's motion.
+    // Turn from inward to prograde as the tangential motion takes over; this
+    // is a viewing convention, not gyroscope/parallel-transport dynamics.
+    let heading=0;
+    if(orbit&&state.look!=="center")heading=state.look==="outward"?Math.PI:Math.atan2(orbit.angularMomentum/distance,-radialRate(distance,m,state.tilt));
+    const basis=heading===0?view.basis:[
+      R.add(R.scale(view.basis[0],Math.cos(heading)),view.basis[2],-Math.sin(heading)),
+      view.basis[1],
+      R.add(R.scale(view.basis[2],Math.cos(heading)),view.basis[0],Math.sin(heading))
+    ];
+    return {...view,basis,progress,orbit:angle,properTime,coordinateTime,initialObserverDistance:start,skyRadius:m.skyRadius,framingScale:framingScale(m,state.observer),stage:distance<m.horizon?"inside":progress>.55?"approach":progress>0?"orbit":"observe",fade:0};
     },256);
   }
-  globalThis.BlackHoleAstrophysics=Object.freeze({constants:C,domain,cacheStats,scenes,model,radialCoordinate,profileAt,fluxFactors,pressureState,entropy,diskProfile,planckLambda,planckNu,visible,spectrum,spectralTable,minimumRadius,framingScale,radialRate,advanceFall,zoomForRadius,camera});
+  function orbitalWorldline(radius,m){
+    return cached("worldlines",["orbital",m.initialObserverDistance,radius,m.orbit.energy,m.orbit.angularMomentum].join(":"),()=>{
+      const rates=logRadius=>{
+        const r=Math.exp(logRadius),u=R.infall([r,0,0],0,0,m.orbit.energy,m.orbit.angularMomentum),weight=r/-u[0];
+        return [m.orbit.angularMomentum/(r*r)*weight,weight,u[3]*weight];
+      };
+      const simpson=(lo,hi,a,b,c)=>a.map((v,i)=>(hi-lo)/6*(v+4*b[i]+c[i]));
+      function integrate(lo,hi,a,b,c,whole,depth){
+        const mid=(lo+hi)/2,leftMid=rates((lo+mid)/2),rightMid=rates((mid+hi)/2);
+        const left=simpson(lo,mid,a,leftMid,b),right=simpson(mid,hi,b,rightMid,c),sum=left.map((v,i)=>v+right[i]),error=sum.map((v,i)=>v-whole[i]);
+        if(error.every((v,i)=>Math.abs(v)<=15e-9*Math.max(1,Math.abs(sum[i]))))return sum.map((v,i)=>v+error[i]/15);
+        if(depth===0)throw new Error("Orbital worldline quadrature did not converge");
+        const refinedLeft=integrate(lo,mid,a,leftMid,b,left,depth-1),refinedRight=integrate(mid,hi,b,rightMid,c,right,depth-1);
+        return refinedLeft.map((v,i)=>v+refinedRight[i]);
+      }
+      // Split at the E=1 unstable circular orbit: the near-critical slowdown
+      // must be resolved even when a coarse quadrature would miss its peak.
+      const boundaries=[radius,...(radius<4&&m.initialObserverDistance>4?[4]:[]),m.initialObserverDistance];
+      const total=[0,0,0];
+      for(let i=1;i<boundaries.length;i++){
+        const lo=Math.log(boundaries[i-1]),hi=Math.log(boundaries[i]),a=rates(lo),b=rates((lo+hi)/2),c=rates(hi);
+        const part=integrate(lo,hi,a,b,c,simpson(lo,hi,a,b,c),20);part.forEach((v,j)=>total[j]+=v);
+      }
+      return {angle:total[0],properTime:total[1],coordinateTime:total[2]};
+    },256);
+  }
+  function observationStart(state,m){const fallback=m.observationStart??350;return m.flow==="grmhd3d"?(state.nativeObservationStart??fallback):fallback;}
+  function observationTime(state,m,view=camera(state,m)){return observationStart(state,m)+state.time*8+view.coordinateTime;}
+  globalThis.BlackHoleAstrophysics=Object.freeze({constants:C,domain,cacheStats,scenes,model,radialCoordinate,profileAt,fluxFactors,pressureState,entropy,diskProfile,planckLambda,planckNu,visible,spectrum,spectralTable,minimumRadius,framingScale,radialRate,advanceFall,zoomForRadius,camera,observationStart,observationTime});
 })();

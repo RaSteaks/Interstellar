@@ -8,7 +8,7 @@
 
 [![WebGL2](https://img.shields.io/badge/WebGL2-%E5%BF%85%E9%9C%80-98aab8?style=flat-square&labelColor=08090d)](#requirements)
 ![界面语言](https://img.shields.io/badge/%E7%95%8C%E9%9D%A2-%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-98aab8?style=flat-square&labelColor=08090d)
-[![场景预设](https://img.shields.io/badge/%E5%9C%BA%E6%99%AF%E9%A2%84%E8%AE%BE-10-98aab8?style=flat-square&labelColor=08090d)](#scenes)
+[![场景预设](https://img.shields.io/badge/%E5%9C%BA%E6%99%AF%E9%A2%84%E8%AE%BE-12-98aab8?style=flat-square&labelColor=08090d)](#scenes)
 ![第三方依赖](https://img.shields.io/badge/%E7%AC%AC%E4%B8%89%E6%96%B9%E4%BE%9D%E8%B5%96-0-98aab8?style=flat-square&labelColor=08090d)
 [![仓库](https://img.shields.io/badge/GitHub-RaSteaks%2FInterstellar-98aab8?style=flat-square&labelColor=08090d&logo=github&logoColor=98aab8)](https://github.com/RaSteaks/Interstellar)
 
@@ -30,9 +30,9 @@
 | 🌌 **实时光线积分** | 入向／外向双 Kerr–Schild 坐标图，Bogacki–Shampine 3(2) 嵌入步进（FSAL 复用接受终点），未收敛与无效光线显式区分。 |
 | 🔥 **物理辐射传输** | 热同步辐射、吸收、法拉第旋转与转换、四分量 Stokes 矩阵指数；纯强度热盘另走独立标量核，不构建偏振基底。 |
 | 🖼️ **按需显示与静止细化** | 画面无变化时停止合成，曝光复用辐射与光晕缓存；交互预算由有效 GPU 计时控制，暂停后最多四次对称子像素采样改善细节，随后只在阴影边缘、光子环等相干边缘处追加更细的光线。每次采样保持原精细分辨率，完整细化的总光线数为单次的四倍，边缘加密另计；交互时用邻域限幅的时间累积抑制边缘爬行。显示链保持色相、使用标准 sRGB 与抖动。 |
-| 🛰️ **类时观察者** | E=1、L=0 的自由落体世界线，按固有时间推进，含运动像差与频移；也可选视界外静止观察者。 |
-| 🎬 **10 个场景预设** | 光学热盘、射电热流、喷流、逆行盘、带电黑洞与规定轨道热点，完整列表见[场景预设](#scenes)表。 |
-| 🧾 **本地生成的 GRMHD 片段** | 由固定提交的 Illinois iharm2d_v3 产出；站点只分发数值记录与来源说明，不含上游求解器源码。 |
+| 🛰️ **类时观察者** | 通常采用 E=1、L=0；史瓦西绕行坠落采用 E=1、L=3.995 的倾斜轨道。按固有时间推进，含运动像差与频移；也可选视界外静止观察者。 |
+| 🎬 **12 个场景预设** | 光学热盘、实时绕行坠落、全局三维 GRMHD、射电热流、喷流、逆行盘、带电黑洞与规定轨道热点，完整列表见[场景预设](#scenes)表。 |
+| 🧾 **本地生成的 GRMHD 数据** | 轴对称场景来自固定提交的 Illinois iharm2d_v3；全局三维场景来自固定提交和可审核补丁的 Athena++。站点只分发数值记录与来源，不含上游可执行文件。 |
 | ⏱️ **热流持续求解（t=800 起）** | 以 t=800 的 float64 检查点为起点，在单个 Worker 内用双精度 Wasm 延续求解；快照固定按 20 GM/c³ 间隔记录，动态历史保留 128 槽。求解不足时冻结在最后一个完整事件并显示等待，不标称持续求解。 |
 | ♿ **可访问性与偏好** | 默认收起的原生 details 面板、原生 select/range、完整键盘路径、Esc 收起并归还焦点，跟随系统「减少动态效果」偏好。 |
 
@@ -59,6 +59,8 @@
 | 预设 | 吸积流 | 说明 |
 | --- | --- | --- |
 | 类星体 · 光学热盘 | 热盘 | 超大质量黑洞，按可见光波段显色 |
+| 史瓦西 · 绕行坠落 | 有限波动热盘 | 430 万太阳质量、a=Q=0；从 80 r_g 出发，视界外绕行约 1.78 圈后坠入，盘外缘为 25 r_g；默认总辐射强度显色 |
+| 全局三维 GRMHD · 史瓦西 | 原生三维磁流体 | 96×64×32；密度、内能、动量与磁场共同演化；230 GHz 强度显色，完整方位角与延迟时刻采样 |
 | 恒星级 · X 射线热盘 | 热盘 | 按 X 射线波段显色 |
 | M87\* · 射电热流与喷流 | GRMHD | 230 GHz，偏振可用 |
 | 银河系中心 · 射电热流 | GRMHD | 230 GHz，显示增益 200（仅显示归一化，不代表光度标定） |
@@ -68,6 +70,8 @@
 | 孤立黑洞 · 星空透镜 | 无盘 | 只留引力透镜星空，不渲染吸积流 |
 | 带电黑洞 · 理论对照 | 热盘 | Kerr–Newman 度规，电荷 Q≠0 |
 | 轨道热点 · 光路时延示例 | 热盘 | 规定方位热点，展示光路时延 |
+
+选择“史瓦西 · 绕行坠落”，展开“镜头与播放”，点击“开始绕行坠落旅程”。轨迹和光线均在浏览器中计算，没有预录视频。倾角控制轨道平面；取景可选“沿轨迹前方”“朝向黑洞”“回望外界”，切换取景保留轨迹和速度。可停止/继续、暂停、缩放选取观察事件，完成后同一按钮可重播。该预设锁定史瓦西时空，选择其它热盘场景可修改时空。盘面在解析稳态基底上加入随流体角速度转动、保持环平均辐射通量的局部发光扰动，未求解三维湍流或反馈；不是银河系中心的观测拟合。默认总辐射为暖色强度显色，可见光仍按光谱计算，约1.6–2.7万K的高温盘可以呈蓝白色。播放速率缩放固有时间，不等同于现实时间。
 
 <a id="quickstart"></a>
 
@@ -102,6 +106,8 @@ python3 tools/build-grmhd-runtime.py
 > **安全上下文必需。** GRMHD 场景首次使用时会下载 `dist/data/grmhd-torus.f32.gz`（7,193,290 字节，6.9 MiB）并按元数据校验 SHA-256，需要 `DecompressionStream` 与 `SubtleCrypto`，即安全上下文（`localhost` 或 https）。校验失败会在面板中报告，而不是静默降级。
 
 > **热流场景为按需加载。** 首次播放还会加载 `dist/data/grmhd-torus.checkpoint.bin.gz`（359,400 字节）与 `dist/solver/grmhd-runtime.wasm`（1,731,097 字节）；检查点恢复失败、Worker 异常或 Wasm 加载失败会明确回退到 t=0–800 的有限播放，不会标称持续求解。
+
+> **三维场景需要额外资源。** 原生三维历史分块下载，每块及整体均校验 SHA-256；加载 Worker 准备速度表示，控制面板保持可操作。GPU 数组纹理层数至少要容纳“方位单元数×快照数”（21 帧、32 方位时为 672 层）；能力不足会明确报错，不退回二维伪装三维。数据体积与实际网格、时长见清单，首次加载和显存使用显著高于原二维场景。
 
 <a id="preview"></a>
 
@@ -196,11 +202,22 @@ node checks/render-physics.cjs     # 历史渲染核心：盘面分布、观察�
 node checks/navigation.cjs         # 手势、去重、缩放边界、缓动、近视界标架
 node checks/idle-drift.cjs         # 空闲绕转、指针／原生手势生命周期、预设与参数原子拒绝、旅程恢复
 node checks/plunge-particles.cjs   # 坠落类时归一化、E/L 守恒、近视界频移、轨迹单调性
+node checks/plunge-orbit.cjs       # 倾斜绕行捕获、完整角动量向量守恒、世界线/四速度/哈密顿加速度一致、跨视界连续性
 node checks/continuous-solver.cjs  # t=800 恢复、native/Wasm 对照、t=1600 有限新状态
 node checks/grmhd-worker.cjs       # 逐帧目标、固定 20 GM/c³ 快照间隔、背压、环形缓存和重置
 ```
 
-真实 GPU 的浏览器检查需要两项本机资源，都不写入项目依赖：
+绕行坠落的真实 GPU 与页面检查使用隔离的 headless WebKit（可用 `SIMULATION_BROWSER=firefox` 切换）。先从仓库根目录启动本地静态服务，再运行：
+
+```bash
+python3 -m http.server 18786 --bind 127.0.0.1
+# 另一个终端中，PLAYWRIGHT_MODULE 指向本机已安装的 Playwright 包。
+PLAYWRIGHT_MODULE=/path/to/playwright node checks/plunge-orbit-browser.cjs http://127.0.0.1:18786
+```
+
+该检查覆盖 7 个内外观察事件、4 个交互档事件、两个既有场景、真实 GPU 光线状态、发光扰动环平均通量、固定观察者下盘面实际演化、标量/完整传输一致性、旅程控制、终点重播、参数原子拒绝、原生选择与键盘、390px 布局、减少动态效果和无视频请求。截图、控制台、请求日志、报告与 Playwright trace 保存在 `verification/plunge-orbit/`。新检查不启动 Chrome，也不访问个人浏览器配置。
+
+下述是旧版 Chrome 检查的历史复现说明；它们尚未迁移到 Firefox/WebKit，当前浏览器测试约束下不要执行这些 runner。历史真实 GPU 检查需要两项本机资源，都不写入项目依赖：
 
 1. **Playwright 与本机 Chrome**：用环境变量 `PLAYWRIGHT_MODULE` 指向宿主机上已安装的 playwright 包目录，`CHROME_EXECUTABLE` 指向本机 Chrome 可执行文件。
 2. **本地静态服务**：端口 8765 服务仓库根目录（用户页面为 `/dist/`，检查页面为 `/checks/`）。固定预算对照另需端口 8766 服务 `verification/thermal/baseline/`，即此前运行保存的原始快照（该目录已被 `.gitignore` 忽略）；独立回归检查不需要基线服务。
@@ -226,6 +243,22 @@ node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 
 ## 🔭 GRMHD 数据与可复现性
 
+全局三维数据由 `tools/generate-grmhd3d.py` 驱动独立 Athena++ 原生进程生成，网格覆盖完整周期方位角，使用 Schwarzschild 时空、理想绝热 GRMHD 和交错面约束输运。它不使用页面的参数化发光扰动，也不使用二维标量延续 Worker。构建、初始磁场标定、上游三维面场索引修正、验证命令、完整双精度重启和有限历史窗口规则见 [`tools/grmhd3d/README.md`](tools/grmhd3d/README.md)。
+
+```bash
+# 需要已有 Clang/Make；Apple Clang 多线程需要已有 libomp。
+python3 tools/generate-grmhd3d.py --threads 8 --run-directory verification/grmhd3d/run-new --time 400
+```
+
+当前附带数据为 `96×64×32`、21 帧、`t=0..400 GM/c³`，压缩下载约164.4 MiB。
+数值方法从 HLLD/PPM 在原生 `t≈200` 检查点切换为 HLLE/PLM，清单保留两个阶段。
+默认新计算采用 HLLE/PLM，并包含独立验证的 EOS 失败路径修复；现有数据来源不会被
+追溯改写为使用了后加的补丁。
+
+页面选择“全局三维 GRMHD · 史瓦西”。网格、快照数、当前观察时刻、末时刻及原生约束均来自真实清单；达到末时刻暂停，“重置三维场景”返回该场景起点。继续原生计算并重新打包后，页面重新加载数据；只对实际存在的相邻快照插值，不循环、不预测尚未计算的未来。这里的全局三维模型仍有极区裁切、粗网格、有限历史、数值大气层和无辐射反馈等限制，不能宣称湍流统计已收敛。
+
+检查入口：`python3 checks/grmhd3d-io.py`、`python3 checks/grmhd3d-frames.py`、`node checks/grmhd3d-data.cjs`，以及 headless Firefox/WebKit 的 `checks/grmhd3d-sampling.cjs` 和 `checks/grmhd3d-browser.cjs`。证据保留在 `verification/grmhd3d/`。
+
 `dist/data/grmhd-torus.*` 是本地生成的轴对称片段，不是外部下载的观测数据：
 
 - 由 `tools/generate-grmhd.py` 在临时目录克隆并固定 `AFD-Illinois/iharm2d_v3` 提交 `bfa06d2cbabf2c8cd94c1711d04fd468397e9aee`，以 64×64 网格、自旋 a=0.9375、电荷 Q=0、t=0..800 运行。
@@ -240,7 +273,7 @@ node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
 
 本项目刻意不宣称超出其实现范围的能力，当前明确的保留项：
 
-- GRMHD 历史为 **64×64、轴对称、有限片段**（t=0–800）；浏览器端 t>800 的延续求解只用于验证 Worker／Wasm／缓存架构，未宣称完整上游 GRMHD 继续运行；未实现三维 GRRMHD，质量与吸积率也不是对 M87\* 或银河系中心的观测拟合。
+- 旧射电热流的 GRMHD 历史为 **64×64、轴对称、有限片段**（t=0–800）；浏览器端 t>800 的延续求解只用于验证 Worker／Wasm／缓存架构，未宣称完整上游 GRMHD 继续运行；未实现三维 GRRMHD，质量与吸积率也不是对 M87\* 或银河系中心的观测拟合。
 - 电子温度与局部同步辐射为文献拟合处方；灰大气不含完整多次散射或返回辐射。
 - 热盘是解析稳态模型，含有限内缘应力、灰消光与注入速度三类模型参数，不由 MRI 自洽导出。
 - 采样以有限光线预算推进，未收敛／无效光线作为显式状态报告，不混入阴影。

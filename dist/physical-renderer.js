@@ -1,7 +1,7 @@
 "use strict";
 
 (() => {
-  function create({canvas,state,onNeedsFrame,onStatus,verification={}}) {
+  function create({canvas,state,onNeedsFrame,onStatus,onDatasetReady,verification={}}) {
     const gl=canvas.getContext("webgl2",{alpha:false,antialias:false,powerPreference:"high-performance"});
     if(!gl||!gl.getExtension("EXT_color_buffer_float"))return null;
     const R=globalThis.BlackHoleRelativity,A=globalThis.BlackHoleAstrophysics,P=globalThis.BlackHolePlasma;
@@ -15,8 +15,9 @@
     // timing fluctuation. GPU work, rather than monitor refresh, owns the budget.
     const BUDGET_SCALES=[.125,.1875,.25,.375,.5,.625,.75,1],DIAGNOSTIC_INTERVAL=250;
     const STATIC_JITTER=[[-.25,-.25],[.25,-.25],[-.25,.25],[.25,.25]];
-    // Keep the CPU packing, RGBA32F byte accounting and shader frame budget in
-    // lockstep; a solver record is 12 interleaved values per 64×64 cell.
+    // Keep CPU packing, RGBA32F accounting and the frame budget in lockstep:
+    // every cell has 12 values. Only the legacy continuation is fixed at 64²;
+    // native 3D history obtains all spatial dimensions from its manifest.
     const MAX_FLUID_FRAMES=169,MAX_DYNAMIC_SLOTS=128,HISTORY_WIDTH=64,HISTORY_CELLS=HISTORY_WIDTH*HISTORY_WIDTH,RECORD_COMPONENTS=12,RGBA_COMPONENTS=4;
     const metrics={mode:"webgl2-volume-grrt",frames:0,geodesicBuilds:0,traceWidth:0,traceHeight:0,traceQuality:"interactive",raySamples:0,unfinishedRays:0,invalidRays:0,observerDistance:80,observerKind:"infall",horizonFade:0,stokes:true,timeDependent:true,fluid:"thermal",dataStatus:"idle",frameMs:0,sourceParticles:0,historyEndTime:800,latestSimulationTime:800,observationTime:null,solverProgressTime:800,solverStepRate:0,continuationStatus:"idle",cacheSlots:MAX_DYNAMIC_SLOTS,historyMissing:false};
     const vertex=`#version 300 es
@@ -28,7 +29,8 @@
       in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;layout(location=2) out vec4 diagnostic;
       uniform vec3 uOrigin;uniform vec4 uObserver,uRight,uUp,uForward;
       uniform vec2 uExtent,uConstants,uJitter;uniform float uDistance,uSpin,uCharge,uHorizon,uIsco,uInner,uOuter,uTime,uRg,uDensityUnit,uSpectrumReference,uTolerance,uChart,uRadialSpeed,uElectronRatio,uMediumStep,uDiskCount,uSkyRadius,uEmissionScale,uDiskSplit,uFarStep,uInitialStep;
-      uniform int uFlow,uBand,uPolarization,uMaxSteps,uFrameCount,uHotspot,uSkyEnabled;
+      uniform int uFlow,uBand,uPolarization,uMaxSteps,uFrameCount,uHotspot,uSkyEnabled,uDiskStructure,uAzimuthalCount,uPlaneTransport;
+      uniform float uRadialCount,uPolarCount,uPolarMinimum,uPolarSpan,uPhiMinimum,uGasGamma,uAtmosMinimum,uAtmosCoefficient,uAtmosPower;
       uniform sampler2D uDisk,uSpectrum,uBessel,uTheta;
       uniform sampler2D uCoarseImage,uCoarseDiagnostic;uniform int uRefine;uniform float uEdgeFloor;
       uniform sampler2DArray uFluid,uVelocity,uMagnetic;
@@ -36,6 +38,13 @@
       uniform float uTimes[MAX_FLUID_FRAMES];uniform int uLayers[MAX_FLUID_FRAMES];uniform vec2 uGrid;
       ${R.glsl}
       ${P.glsl}
+      #ifndef THERMAL_SCALAR
+      bool planeTransport;vec4 planeWeights;
+      void planeScreen(vec3 x,vec4 p,Geometry m,out vec4 normal,out vec4 tangent){
+        normal=vec4(normalize(cross(x,p.xyz)),0.);
+        tangent=vec4(cross(normal.xyz,p.xyz),0.);tangent/=sqrt(gdot(tangent,tangent,m));
+      }
+      #endif
       const float PI=3.141592653589793;
       // Azimuthal/time chart integrals. Every caller anchors the azimuthal term at
       // the observer radius; relativity.js changeChart passes the same anchor, so
@@ -78,12 +87,27 @@
       vec3 bandSpectrum(float t){return texture(uSpectrum,vec2((clamp((log(max(t,1e-20))/log(10.)-2.)/8.,0.,1.)*767.+.5)/768.,.5)).rgb;}
       float planck(float nu,float t){return plasmaPlanck(nu,t);}
       vec3 bessel(float theta){return texture(uBessel,vec2((clamp((log(theta)/log(10.)+1.3)/5.3,0.,1.)*383.+.5)/384.,.5)).xyz;}
-      vec4 fluidSample(sampler2DArray tex,vec2 uv,float time){
+      vec4 fluidLayer(sampler2DArray tex,vec2 uv,float layer){
+        #ifdef DISK_MANUAL_INTERPOLATION
+        ivec2 last=textureSize(tex,0).xy-1;vec2 pixel=clamp(uv*vec2(last+1)-.5,vec2(0.),vec2(last));ivec2 lo=ivec2(floor(pixel));vec2 f=fract(pixel);
+        return mix(mix(texelFetch(tex,ivec3(lo,int(layer)),0),texelFetch(tex,ivec3(min(lo+ivec2(1,0),last),int(layer)),0),f.x),mix(texelFetch(tex,ivec3(min(lo+ivec2(0,1),last),int(layer)),0),texelFetch(tex,ivec3(min(lo+ivec2(1),last),int(layer)),0),f.x),f.y);
+        #else
+        return texture(tex,vec3(uv,layer));
+        #endif
+      }
+      vec4 fluidSpatial(sampler2DArray tex,vec2 uv,int frame,float phi){
+        if(uAzimuthalCount==1)return fluidLayer(tex,uv,float(frame));
+        // Each native frame owns all phi slices. Wrap within that frame before
+        // temporal interpolation; hardware array filtering never crosses layers.
+        float n=float(uAzimuthalCount),index=fract((phi-uPhiMinimum)/(2.*PI))*n-.5,lo=floor(index);
+        return mix(fluidLayer(tex,uv,float(frame)*n+mod(lo,n)),fluidLayer(tex,uv,float(frame)*n+mod(lo+1.,n)),fract(index));
+      }
+      vec4 fluidSample(sampler2DArray tex,vec2 uv,float time,float phi){
         if(uFrameCount<1||time<uTimes[0]||time>uTimes[uFrameCount-1])return vec4(0.);
         int lo=0,hi=uFrameCount-1;
         for(int j=0;j<8;j++){int mid=(lo+hi)/2;if(uTimes[mid]<=time)lo=mid;else hi=mid;}
         int next=min(lo+1,uFrameCount-1);float f=clamp((time-uTimes[lo])/max(.0001,uTimes[next]-uTimes[lo]),0.,1.);
-        return mix(texture(tex,vec3(uv,float(uLayers[lo]))),texture(tex,vec3(uv,float(uLayers[next]))),f);
+        return mix(fluidSpatial(tex,uv,uLayers[lo],phi),fluidSpatial(tex,uv,uLayers[next],phi),f);
       }
       vec4 cartesian(vec4 spherical,vec3 x,float r,float a){
         float ct=clamp(x.z/r,-1.,1.),st=max(1e-10,length(x.xy)/sqrt(r*r+a*a));
@@ -139,32 +163,66 @@
         if(rayChart<0.){float ur=dot(m.dr,velocity.xyz);velocity.xy+=(rayChart-1.)*uSpin*(1./delta-1./D)*ur*vec2(-x.y,x.x);velocity.w+=(rayChart-1.)*(2.*r-uCharge*uCharge)/delta*ur;}
         return true;
       }
+      float thermalFluxPattern(float phase,float radial,float seed){
+        // Non-resonant integer modes keep the annular average exactly one.
+        return (1.+.9*sin(3.*phase+9.*radial+seed))*(1.+.65*sin(7.*phase-19.*radial-1.7*seed))
+             *(1.+.4*sin(17.*phase+37.*radial+2.3*seed))*(1.+.2*sin(41.*phase-71.*radial-3.1*seed));
+      }
+      float thermalFluxModulation(vec3 x,Geometry m,vec4 velocity,float time){
+        if(uDiskStructure==0)return 1.;
+        float r=m.r,delta=r*r-2.*r+uSpin*uSpin+uCharge*uCharge,ur=dot(m.dr,velocity.xyz);
+        float phi=atan(x.y,x.x),angular=(x.x*velocity.y-x.y*velocity.x)/(x.x*x.x+x.y*x.y),clock=velocity.w;
+        if(rayChart<0.){
+          phi+=2.*atan(uSpin/r)+2.*(chartIntegral(r).x-chartIntegral(uDistance).x);
+          angular+=2.*uSpin*(1./delta-1./(r*r+uSpin*uSpin))*ur;
+          clock+=2.*(2.*r-uCharge*uCharge)/delta*ur;
+        }
+        float omega=angular/clock,radial=log(r/uIsco),epoch=floor(time/64.),age=time-epoch*64.;
+        // Prescribed surface-flux fluctuations, advected with the SAME fluid
+        // angular velocity used for Doppler shifts. This is not a GRMHD solve.
+        // Blend finite-lived realizations to avoid indefinitely winding a
+        // texture below pixel scale. Epoch replacement has zero weight and
+        // zero weight derivative, so emitted light remains continuous.
+        // Each realization and their convex blend have unit annular mean;
+        // T^4 modulation preserves the base radial bolometric flux.
+        float previous=thermalFluxPattern(phi-omega*(age+64.),radial,(epoch-1.)*2.39996323);
+        float current=thermalFluxPattern(phi-omega*age,radial,epoch*2.39996323);
+        return mix(previous,current,smoothstep(0.,64.,age));
+      }
       #ifndef THERMAL_SCALAR
       void source(vec3 x,vec4 p,float time,vec4 horizontal,vec4 vertical,out vec3 color,out float alpha,out vec3 absorption,out vec3 rho,out vec4 equilibrium,out float emittedEnergy){
         color=vec3(0.);alpha=0.;absorption=vec3(0.);rho=vec3(0.);equilibrium=vec4(1.,0.,0.,0.);emittedEnergy=1.;
         if(uFlow==0)return;Geometry m=metric(x,uSpin,uCharge);float r=m.r;
         if(r<uInner||r>uOuter)return;
+        if(planeTransport){
+          // In Schwarzschild, the orbital normal is parallel and the second
+          // Eulerian-screen axis is parallel modulo a null gauge. Constant
+          // observer coefficients therefore preserve the exact polarization
+          // class, without integrating two connection ODEs at every step.
+          vec4 n,t;planeScreen(x,p,m,n,t);horizontal=planeWeights.x*n+planeWeights.y*t;vertical=planeWeights.z*n+planeWeights.w*t;
+        }
         // Ordinary axisymmetric thermal matter has no emission-time dependence.
-        if(rayChart<0.&&(uFlow==2||uHotspot==1))time+=2.*(chartIntegral(r).y-chartIntegral(uDistance).y);
+        if(rayChart<0.&&(uFlow==2||uHotspot==1||uDiskStructure==1))time+=2.*(chartIntegral(r).y-chartIntegral(uDistance).y);
         // Finite simulation history is not wrapped or extrapolated into a
         // different epoch. Geometry and the sky continue beyond missing cells.
         if(uFlow==2&&(time<uTimes[0]||time>uTimes[uFrameCount-1]))return;
         vec4 velocity,magnetic;float ne,t,B=0.,magneticNorm=0.;
         if(uFlow==2){
-          float angle=acos(clamp(x.z/r,-1.,1.))/PI;
-          float theta=texture(uTheta,vec2((angle*511.+.5)/512.,.5)).r;
-          vec2 uv=vec2(theta,(log(r)-uGrid.x)/uGrid.y/64.);
-          if(any(lessThan(uv,vec2(0.)))||any(greaterThan(uv,vec2(1.))))return;
-          vec4 f=fluidSample(uFluid,uv,time);float density=exp(f.x),internal=exp(f.y),bsq=max(1e-30,f.z);
+          vec3 physical=physicalPoint(x,r);float phi=atan(physical.y,physical.x),angle=acos(clamp(x.z/r,-1.,1.));
+          float theta=uAzimuthalCount>1?(angle-uPolarMinimum)/uPolarSpan:texture(uTheta,vec2((angle/PI*511.+.5)/512.,.5)).r;
+          vec2 uv=vec2(theta,(log(r)-uGrid.x)/uGrid.y/uRadialCount);
+          if(theta<0.||theta>1.)return;
+          if(uAzimuthalCount==1&&(uv.y<0.||uv.y>1.))return;
+          vec4 f=fluidSample(uFluid,uv,time,phi);float density=exp(f.x),internal=exp(f.y),bsq=max(1e-30,f.z);
           // Suppress numerical atmosphere and unresolved, highly magnetized
           // funnel cells. The emitting jet sheath remains actual evolved fluid.
-          if(density<1.5e-7*pow(r,-1.5)||bsq/density>50.)return;
+          if(density<1.5*max(uAtmosMinimum,uAtmosCoefficient*pow(r,uAtmosPower))||bsq/density>50.)return;
           ne=density*uDensityUnit/1.67262192369e-24;
-          float beta=2.*(2./3.)*internal/bsq,ratio=(1.+uElectronRatio*beta*beta)/(1.+beta*beta);
-          t=(2./3.)*internal/density*1.0888198e13/(1.+ratio);
-          vec4 incoming;velocity=evolvedVelocity(fluidSample(uVelocity,uv,time),x,r,incoming);
-          vec3 physical=physicalPoint(x,r);float saved=rayChart;rayChart=1.;Geometry regular=metric(physical,uSpin,uCharge);
-          vec4 field=cartesian(fluidSample(uMagnetic,uv,time),physical,r,uSpin);
+          float beta=2.*(uGasGamma-1.)*internal/bsq,ratio=(1.+uElectronRatio*beta*beta)/(1.+beta*beta);
+          t=(uGasGamma-1.)*internal/density*1.0888198e13/(1.+ratio);
+          vec4 incoming;velocity=evolvedVelocity(fluidSample(uVelocity,uv,time,phi),x,r,incoming);
+          float saved=rayChart;rayChart=1.;Geometry regular=metric(physical,uSpin,uCharge);
+          vec4 field=cartesian(fluidSample(uMagnetic,uv,time,phi),physical,r,uSpin);
           field+=incoming*gdot(field,incoming,regular);magneticNorm=sqrt(max(0.,gdot(field,field,regular)));rayChart=saved;
           magnetic=rayChart>0.?field:convertVector(field,physical,x,r,1.,-1.);
           B=magneticNorm*sqrt(4.*PI*uDensityUnit*8.98755179e20);
@@ -174,6 +232,7 @@
           // Normalize in the regular chart before applying its time/radial
           // Jacobian. The same exact congruence is shared with the scalar path.
           if(!thermalEmitter(x,m,velocity))return;magnetic=vec4(0.);
+          t*=pow(thermalFluxModulation(x,m,velocity,time),.25);
           if(uHotspot==1){
             float spot=max(uIsco*1.8,7.),omega=1./(pow(spot,1.5)+uSpin),physicalPhi=atan(x.y,x.x);
             if(rayChart<0.)physicalPhi+=2.*atan(uSpin/r)+2.*(chartIntegral(r).x-chartIntegral(uDistance).x);
@@ -226,7 +285,7 @@
         }
         // Keep the evolved-data edge convention; thermal matter has no
         // artificial outer fade, so its finite boundary must converge in images.
-        if(uFlow==2){float edge=1.-smoothstep(uOuter*.9,uOuter,r);alpha*=edge;absorption*=edge;rho*=edge;}
+        if(uFlow==2&&uAzimuthalCount==1){float edge=1.-smoothstep(uOuter*.9,uOuter,r);alpha*=edge;absorption*=edge;rho*=edge;}
       }
       #else
       // Gray LTE intensity requires only a scalar optical depth. This variant
@@ -236,9 +295,10 @@
         Geometry m=metric(x,uSpin,uCharge);float r=m.r;if(r<uInner||r>uOuter)return;
         vec4 f=disk(r);float height=max(1e-5,f.y),z=x.z/height;if(abs(z)>8.)return;
         float ne=f.z*exp(-.5*z*z),t=f.x;
-        // Retarded time is required only by the prescribed moving hotspot.
-        if(rayChart<0.&&uHotspot==1)time+=2.*(chartIntegral(r).y-chartIntegral(uDistance).y);
+        // Both the hotspot and advected surface structure use retarded time.
+        if(rayChart<0.&&(uHotspot==1||uDiskStructure==1))time+=2.*(chartIntegral(r).y-chartIntegral(uDistance).y);
         vec4 velocity;if(!thermalEmitter(x,m,velocity))return;
+        t*=pow(thermalFluxModulation(x,m,velocity,time),.25);
         if(uHotspot==1){
           float spot=max(uIsco*1.8,7.),omega=1./(pow(spot,1.5)+uSpin),phi=atan(x.y,x.x);
           if(rayChart<0.)phi+=2.*atan(uSpin/r)+2.*(chartIntegral(r).x-chartIntegral(uDistance).x);
@@ -341,6 +401,8 @@
         #ifndef THERMAL_SCALAR
         vec4 horizontal=uRight-direction.x*spatial;horizontal/=sqrt(gdot(horizontal,horizontal,initial));
         vec4 vertical=uUp-direction.y*spatial;vertical-=horizontal*gdot(vertical,horizontal,initial);vertical/=sqrt(gdot(vertical,vertical,initial));
+        vec3 angular=cross(uOrigin,initialP.xyz);planeTransport=uPlaneTransport==1&&dot(angular,angular)>1e-16;
+        if(planeTransport){vec4 n,t;planeScreen(uOrigin,initialP,initial,n,t);planeWeights=vec4(gdot(horizontal,n,initial),gdot(horizontal,t,initial),gdot(vertical,n,initial),gdot(vertical,t,initial));}
         mat4 transfer=mat4(1.);
         #else
         float transmission=1.;
@@ -354,7 +416,7 @@
         vec3 total=vec3(0.);vec4 totalStokes=vec4(0.);
         int status=0,accepted=0;float maxError=0.,depth=0.;bool reachedExterior=uDistance>uHorizon*1.00001;
         bool boundedInterior=uDistance<uHorizon&&radialBarrier(uOrigin,initialP);
-        for(int i=0;i<2048;i++){
+        for(int i=0;i<4096;i++){
           if(i>=uMaxSteps)break;
           if(m.r>uSkyRadius){status=1;break;}
           vec4 velocity=rayDx;
@@ -375,7 +437,7 @@
             vec3 target=vec3((m.r*cos(phi)+uSpin*sin(phi))*st,(m.r*sin(phi)-uSpin*cos(phi))*st,x.z);
             vec4 tangent=convertVector(velocity,x,target,m.r,1.,-1.);
             #ifndef THERMAL_SCALAR
-            horizontal=convertVector(horizontal,x,target,m.r,1.,-1.);vertical=convertVector(vertical,x,target,m.r,1.,-1.);
+            if(!planeTransport){horizontal=convertVector(horizontal,x,target,m.r,1.,-1.);vertical=convertVector(vertical,x,target,m.r,1.,-1.);}
             #endif
             x=target;time-=2.*integral.y;rayChart=-1.;m=metric(x,uSpin,uCharge);p=lower4(tangent,m).xyz;rhsAtMetric(p,energy,m,rayDx,rayDp);
             h=min(h,.05);continue;
@@ -394,7 +456,19 @@
               if(abs(x.z)<8.*height)limit=min(limit,.08*uMediumStep*m.r/speed);
             }
           }
-          if(uFlow==2&&m.r<uOuter)limit=min(limit,.065*uMediumStep*m.r/max(1.,length(velocity.xyz)));
+          if(uFlow==2&&m.r<uOuter){
+            float medium=.065*m.r;
+            if(uAzimuthalCount>1){
+              float angle=acos(clamp(x.z/m.r,-1.,1.));
+              // There is no sampled material in the polar cutouts or below
+              // the inner data boundary. Vanishing phi cells on the axis must
+              // not force zero affine steps through that unmodeled region.
+              if(m.r>=uInner&&angle>=uPolarMinimum&&angle<=uPolarMinimum+uPolarSpan){
+                medium=.45*m.r*min(uGrid.y,min(uPolarSpan/uPolarCount,2.*PI*sin(angle)/float(uAzimuthalCount)));
+              }else medium=1e30;
+            }
+            limit=min(limit,medium*uMediumStep/max(1.,length(velocity.xyz)));
+          }
           h=min(h,limit);vec3 nx,np;float nt,error;
           stepBSSeeded(x,p,time,energy,uSpin,uCharge,h,rayDx,rayDp,nx,np,nt,error,m,rayDx,rayDp);
           // A nonfinite trial is rejected while a smaller affine step remains
@@ -417,7 +491,7 @@
           x=nx;p=np;time=nt;
           #else
           vec4 nh=horizontal,nv=vertical;
-          if(uPolarization==1)transportStep(x,p,energy,horizontal,vertical,h,nh,nv);
+          if(uPolarization==1&&!planeTransport)transportStep(x,p,energy,horizontal,vertical,h,nh,nv);
           vec3 color,absorption,rho;float alpha,emitted;vec4 equilibrium;
           source(midpoint,momentum,uTime+(time+nt)*.5,(horizontal+nh)*.5,(vertical+nv)*.5,color,alpha,absorption,rho,equilibrium,emitted);
           if(isnan(alpha)||isinf(alpha)||any(isnan(color))||any(isinf(color))||any(isnan(rho))||any(isinf(rho))||any(isnan(absorption))||any(isinf(absorption))||isnan(emitted)||isinf(emitted)){if(h>1e-5){h=max(1e-5,h*.5);seedBS(x,p,energy,uSpin,uCharge,m,rayDx,rayDp);continue;}status=4;break;}
@@ -432,7 +506,7 @@
             if(length(transfer[0])+length(transfer[1])+length(transfer[2])+length(transfer[3])<1e-7){status=3;break;}
           }
           x=nx;p=np;time=nt;horizontal=nh;vertical=nv;
-          if(uPolarization==1)recondition(vec4(p,energy),m,horizontal,vertical);
+          if(uPolarization==1&&!planeTransport)recondition(vec4(p,energy),m,horizontal,vertical);
           #endif
           h*=clamp(.9*pow(uTolerance/max(error,1e-15),1./3.),.5,2.);
         }
@@ -579,10 +653,10 @@
     for(let i=0;i<512;i++){const angle=i/511;let lo=0,hi=1;for(let j=0;j<40;j++){const t=(lo+hi)/2;if(t+.7/(2*Math.PI)*Math.sin(2*Math.PI*t)>angle)hi=t;else lo=t;}thetaData[i*4]=(lo+hi)/2;}
     const thetaTexture=texture(512,1,thetaData),empty=texture(1,1,new Float32Array(4),1),emptyFluidFrames={times:new Float32Array([0]),layers:new Int32Array([0]),count:1};
     let fluidTextures=[empty,empty,empty],simulation=null,continuation=null,historyFrameCount=0,fluidLayerCount=1,dynamicFrames=new Map(),fluidFrameCache=null,fluidFrameCacheDirty=true,loading=null,disposed=false,target=null,profile=null,profileKey="",geometryKey="",lastTime=-1,refined=false,refinementDue=false,timer=0,ema=25,frameCounter=0,lastWall=null,budgetScale=1,lastInteractive=false,lastActive=false,renderVersion=0,gpuPollTimer=0;
-    let cachedModel=null,modelKey="",cachedCamera=null,cameraKey="",driftStep=1e-4;
+    let cachedModel=null,modelKey="",cachedCamera=null,cameraKey="",driftStep=1e-4,simulationKey="",simulationSerial=0;
     const profileCache=new Map(),spectrumCache=new Map(),gpuJobs=[];
     let glowTarget=null,accumulationTargets=[],accumulationIndex=0,displayKey="",glowKey="",progressiveKey="",progressiveSamples=0;
-    let refineTarget=null,refineValid=false,taaTargets=[],taaIndex=0,taaValid=false,taaFrame=0;
+    let refineTarget=null,refineValid=false,taaTargets=[],taaIndex=0,taaValid=false,taaFrame=0,volumeFence=null;
     let diagnosticRequested=false,diagnosticTimer=0,lastDiagnosticAt=-Infinity,budgetLevel=BUDGET_SCALES.length-1,gpuBudgetMs=null,gpuBudgetAt=0,gpuBudgetSamples=0,budgetSamplesUsed=0,budgetRegime="";
     // Scientific oracles keep their deterministic center ray unless they opt
     // into the separate display-sampling checks. Four symmetric rays have zero
@@ -593,6 +667,7 @@
     // layers over the same rays. Oracle renderers that pass verification options
     // keep the plain single-ray image unless a check opts in explicitly.
     const enhanced=verification.displayEnhancements===true||Object.keys(verification).length===0;
+    const volumeBackpressure=Object.keys(verification).length===0||verification.volumeBackpressure===true;
     Object.assign(metrics,{refineBuilds:0,refineWidth:0,refineHeight:0,taaFrames:0,composites:0,glowBuilds:0,diagnosticReadbacks:0,progressiveSamples:0,progressiveTarget:1,progressiveRaySamples:0,budgetLevel,budgetTimingSource:"pending"});
     metrics.timingSource=gpuTimer?"gpu-query-pending":"cpu-submission";metrics.traceTimingSource=metrics.timingSource;metrics.compositeTimingSource=metrics.timingSource;metrics.endToEndTimingSource="cpu-submission";metrics.timingSamples=[];metrics.renderVersion=0;metrics.diagnosticPending=false;metrics.modelBuilds=0;metrics.profileBuilds=0;metrics.observerBuilds=0;metrics.spectrumBuilds=0;
     // The optional verification argument is local to a test renderer. Product
@@ -610,27 +685,41 @@
       }return cachedModel;
     }
     function observer(m){
-      const key=[modelKey,state.tilt,state.viewZoom??state.zoom,state.flightRadius,state.observer,state.yaw,state.drift].join(":");
+      const key=[modelKey,state.tilt,state.viewZoom??state.zoom,state.flightRadius,state.observer,state.look,state.yaw,state.drift].join(":");
       if(key!==cameraKey){cameraKey=key;cachedCamera=A.camera(state,m);metrics.observerBuilds++;}return cachedCamera;
     }
-    function requestSimulation(){
-      if(loading)return loading;metrics.dataStatus="loading";onStatus?.("正在载入热流历史与持续求解器。");
-      loading=P.loadSimulation().then(data=>{
-        if(disposed)return;const {records,metadata}=data,n=records.length/RECORD_COMPONENTS,nextHistoryFrameCount=metadata.times.length,nextFluidLayerCount=nextHistoryFrameCount+MAX_DYNAMIC_SLOTS;
+    function discardFluidTextures(){
+      for(const t of fluidTextures)if(t!==empty){gl.deleteTexture(t);textures.delete(t);}
+      fluidTextures=[empty,empty,empty];metrics.registeredTextures=textures.size;
+    }
+    function requestSimulation(m){
+      const dataset=m.dataset||"grmhd-torus";
+      if(loading&&simulationKey===dataset){if(simulation)onDatasetReady?.(dataset,simulation.metadata);return loading;}
+      const serial=++simulationSerial;simulationKey=dataset;simulation=null;continuation?.destroy();continuation=null;
+      discardFluidTextures();historyFrameCount=0;fluidLayerCount=1;dynamicFrames.clear();invalidateFluidFrameCache();
+      metrics.dataStatus="loading";metrics.grmhdResolution=null;metrics.grmhdFrames=0;metrics.nativeDiagnostics=null;metrics.continuationStatus="loading";onStatus?.(dataset==="grmhd3d"?"正在校验和载入原生三维 GRMHD 快照…":"正在载入热流历史与持续求解器。");
+      loading=P.loadSimulation(dataset).then(data=>{
+        if(disposed||serial!==simulationSerial)return;
+        const {records,metadata}=data,n=records.length/RECORD_COMPONENTS,nextHistoryFrameCount=metadata.times.length;
+        const nr=metadata.resolution[0],nt=metadata.resolution[1],np=metadata.resolution[2]??1,cells=nr*nt,cacheSlots=np>1?0:MAX_DYNAMIC_SLOTS,nextFluidLayerCount=(nextHistoryFrameCount+cacheSlots)*np;
         // Validate the layer budget and record count before publishing the new
         // object; a rejected dataset must never leave render() in GRMHD mode.
-        if(nextFluidLayerCount>MAX_FLUID_FRAMES)throw new Error("GRMHD history and cache exceed the shader frame budget");
-        if(n!==HISTORY_CELLS*nextHistoryFrameCount)throw new Error("GRMHD history has an unexpected record count");
+        if(nextHistoryFrameCount+cacheSlots>MAX_FLUID_FRAMES)throw new Error("GRMHD history and cache exceed the shader frame budget");
+        if(nextFluidLayerCount>gl.getParameter(gl.MAX_ARRAY_TEXTURE_LAYERS))throw new Error(`三维历史需要 ${nextFluidLayerCount} 个纹理层，超出当前 GPU 能力`);
+        if(n!==cells*np*nextHistoryFrameCount)throw new Error("GRMHD history has an unexpected record count");
+        if(metadata.spin!==m.spin||metadata.charge!==m.charge)throw new Error("GRMHD dataset and selected metric disagree");
         simulation=data;historyFrameCount=nextHistoryFrameCount;fluidLayerCount=nextFluidLayerCount;
-        metrics.solverTextureBytes=3*HISTORY_WIDTH*HISTORY_WIDTH*fluidLayerCount*RGBA_COMPONENTS*Float32Array.BYTES_PER_ELEMENT;metrics.solverCpuCacheBytes=MAX_DYNAMIC_SLOTS*HISTORY_CELLS*RECORD_COMPONENTS*Float32Array.BYTES_PER_ELEMENT;metrics.solverMemoryBytes=metrics.solverTextureBytes+metrics.solverCpuCacheBytes;
+        metrics.solverTextureBytes=3*cells*fluidLayerCount*RGBA_COMPONENTS*Float32Array.BYTES_PER_ELEMENT;metrics.solverCpuCacheBytes=cacheSlots*cells*RECORD_COMPONENTS*Float32Array.BYTES_PER_ELEMENT;metrics.historyCpuBytes=records.byteLength+(data.velocities?.byteLength??0);metrics.solverMemoryBytes=metrics.solverTextureBytes+metrics.solverCpuCacheBytes;metrics.totalDataMemoryBytes=metrics.solverMemoryBytes+metrics.historyCpuBytes;
         fluidTextures=Array.from({length:3},(_,field)=>{
-          const packed=field===1?P.velocityTexture(records,metadata):new Float32Array(n*RGBA_COMPONENTS);
+          const packed=field===1?(data.velocities||P.velocityTexture(records,metadata)):new Float32Array(n*RGBA_COMPONENTS);
           if(field!==1)for(let i=0;i<n;i++)packed.set(records.subarray(i*RECORD_COMPONENTS+field*RGBA_COMPONENTS,i*RECORD_COMPONENTS+field*RGBA_COMPONENTS+RGBA_COMPONENTS),i*RGBA_COMPONENTS);
-          const layers=new Float32Array(HISTORY_CELLS*fluidLayerCount*RGBA_COMPONENTS);layers.set(packed);
-          return texture(HISTORY_WIDTH,HISTORY_WIDTH,layers,fluidLayerCount);
+          const layers=cacheSlots?new Float32Array(cells*fluidLayerCount*RGBA_COMPONENTS):packed;if(cacheSlots)layers.set(packed);
+          return texture(nt,nr,layers,fluidLayerCount);
         });
-        metrics.dataStatus="ready";metrics.grmhdResolution=metadata.resolution;metrics.grmhdFrames=metadata.times.length;metrics.grmhdSpin=metadata.spin;metrics.historyEndTime=metadata.times[metadata.times.length-1];metrics.latestSimulationTime=metrics.historyEndTime;metrics.solverProgressTime=metrics.historyEndTime;metrics.cacheSlots=MAX_DYNAMIC_SLOTS;
-        dynamicFrames.clear();invalidateFluidFrameCache();geometryKey="";
+        const uploadError=gl.getError();if(uploadError!==gl.NO_ERROR)throw new Error(`GPU 无法容纳该三维历史（WebGL ${uploadError}）`);
+        metrics.dataStatus="ready";metrics.grmhdResolution=metadata.resolution;metrics.grmhdFrames=metadata.times.length;metrics.grmhdSpin=metadata.spin;metrics.historyEndTime=metadata.times[metadata.times.length-1];metrics.latestSimulationTime=metrics.historyEndTime;metrics.solverProgressTime=metrics.historyEndTime;metrics.cacheSlots=cacheSlots;metrics.nativeDiagnostics=np>1?{maxDivB:metadata.maxDivB,maxVelocityNormError:metadata.maxVelocityNormError,frameDiagnostics:metadata.frameDiagnostics}:null;
+        dynamicFrames.clear();invalidateFluidFrameCache();geometryKey="";profileKey="";
+        if(np>1){metrics.continuationStatus="finite-3d";metrics.continuationFallback=false;onDatasetReady?.(dataset,metadata);onStatus?.("全局三维 GRMHD 快照已载入；后续演化由独立求解器计算。");onNeedsFrame();return;}
         const factory=globalThis.BlackHoleGrmhdContinuation;
         if(factory){
           const checkpoint=metadata.checkpoint;
@@ -651,7 +740,7 @@
           metrics.continuationStatus="unavailable";metrics.continuationFallback=true;onStatus?.("当前浏览器不支持持续求解，已回退到有限片段播放。");
         }
         onStatus?.("热流历史已载入；播放可继续生成 t>800 的状态。");onNeedsFrame();
-      }).catch(error=>{loading=null;if(disposed)return;simulation=null;fluidTextures=[empty,empty,empty];historyFrameCount=0;fluidLayerCount=1;dynamicFrames.clear();invalidateFluidFrameCache();metrics.dataStatus="error";metrics.continuationStatus="unavailable";onStatus?.("热流历史未能载入，请选择热盘场景或刷新重试。");console.error("GRMHD history unavailable",error);onNeedsFrame();});return loading;
+      }).catch(error=>{if(disposed||serial!==simulationSerial)return;loading=null;simulation=null;discardFluidTextures();historyFrameCount=0;fluidLayerCount=1;dynamicFrames.clear();invalidateFluidFrameCache();metrics.dataStatus="error";metrics.continuationStatus="unavailable";onStatus?.("GRMHD 历史未能载入，请选择热盘场景或刷新重试。");console.error("GRMHD history unavailable",error);onNeedsFrame();});return loading;
     }
     function upload(t,width,data){gl.bindTexture(gl.TEXTURE_2D,t);gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,width,1,gl.RGBA,gl.FLOAT,data);}
     function uploadLayer(t,layer,data){gl.bindTexture(gl.TEXTURE_2D_ARRAY,t);gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,layer,HISTORY_WIDTH,HISTORY_WIDTH,1,gl.RGBA,gl.FLOAT,data);}
@@ -733,13 +822,13 @@
     }
     function updateProfile(m){
       const key=[state.scene,m.spin,m.charge,m.outer,state.band,verification.spectrumReferenceTemperature].join(":");if(key===profileKey)return;profileKey=key;
-      const diskKey=[state.scene,m.spin,m.charge,m.outer,m.massRate].join(":");let disk=profileCache.get(diskKey);
-      if(!disk){disk=m.flow==="vacuum"?{data:new Float32Array(diskCount*4),count:diskCount,constants:R.inflowConstants(m.spin,m.charge),inner:m.horizon*1.0001,outer:m.outer,peakTemperature:25000}:A.diskProfile(m,diskCount);boundedCache(profileCache,diskKey,disk);metrics.profileBuilds++;}
+      const sourceInner=m.flow==="grmhd3d"?simulation?.metadata.innerRadius:null,diskKey=[state.scene,m.spin,m.charge,m.outer,m.massRate,sourceInner].join(":");let disk=profileCache.get(diskKey);
+      if(!disk){disk=m.flow==="vacuum"||m.flow==="grmhd3d"?{data:new Float32Array(diskCount*4),count:diskCount,constants:R.inflowConstants(m.spin,m.charge),inner:sourceInner??m.horizon*1.0001,outer:m.outer,peakTemperature:25000}:A.diskProfile(m,diskCount);boundedCache(profileCache,diskKey,disk);metrics.profileBuilds++;}
       upload(diskTexture,diskCount,disk.data);
-      const temperature=verification.spectrumReferenceTemperature??(m.flow==="grmhd"?1e11:disk.peakTemperature),spectrumKey=[state.band,temperature].join(":");let spectrum=spectrumCache.get(spectrumKey);
+      const temperature=verification.spectrumReferenceTemperature??(m.recorded?1e11:disk.peakTemperature),spectrumKey=[state.band,temperature].join(":");let spectrum=spectrumCache.get(spectrumKey);
       if(!spectrum){spectrum=A.spectralTable(state.band,temperature);boundedCache(spectrumCache,spectrumKey,spectrum);metrics.spectrumBuilds++;}
-      upload(spectrumTexture,768,spectrum.data);profile={...disk,reference:spectrum.reference*(m.flow==="grmhd"?1e3*.02:1)};
-      if(m.flow==="grmhd")requestSimulation();
+      upload(spectrumTexture,768,spectrum.data);profile={...disk,reference:spectrum.reference*(m.recorded?1e3*.02:1)};
+      if(m.recorded)requestSimulation(m);
     }
     function timing(kind,ms,source,version,frame){
       // Completion polling can observe several frames together; an older
@@ -757,6 +846,9 @@
     }
     function pollGpuJobs(){
       gpuPollTimer=0;if(disposed)return;const now=performance.now(),disjoint=gpuTimer&&gl.getParameter(gpuTimer.GPU_DISJOINT_EXT);let diagnosticFinished=false;
+      if(volumeFence&&gl.clientWaitSync(volumeFence,0,0)!==gl.TIMEOUT_EXPIRED){
+        gl.deleteSync(volumeFence);volumeFence=null;metrics.volumeGpuBusy=false;onNeedsFrame();
+      }
       // A disjoint event invalidates the controller's previous GPU estimate as
       // well as new queries. Recover via the named wall-time fallback meanwhile.
       if(disjoint){gpuBudgetMs=null;gpuBudgetSamples=0;budgetSamplesUsed=0;}
@@ -787,7 +879,7 @@
       }
       metrics.diagnosticPending=gpuJobs.some(job=>job.kind==="diagnostic"&&job.version===renderVersion);
       if(diagnosticFinished&&diagnosticRequested&&!document.hidden)onNeedsFrame();
-      if(gpuJobs.length)gpuPollTimer=setTimeout(pollGpuJobs,8);
+      if(gpuJobs.length||volumeFence)gpuPollTimer=setTimeout(pollGpuJobs,8);
     }
     function enqueueJob(job){
       gpuJobs.push(job);if(gpuJobs.length>24){
@@ -867,13 +959,24 @@
       gl.uniform2f(u.uJitter,jitter[0]/outWidth,jitter[1]/outHeight);
       // The observation event's KS time shifts the retarded fluid time.  The
       // renderer never extrapolates beyond the newest complete solver snapshot.
-      const observationTime=350+state.time*8+camera.coordinateTime,availableTime=metrics.latestSimulationTime??metrics.historyEndTime,simulationTime=m.flow==="grmhd"?Math.min(observationTime,availableTime):observationTime,rhoUnit=simulation?m.massRate/(simulation.metadata.accretionRateCode*m.rg*m.rg*A.constants.c)*.001:0;
-      const values={uDistance:camera.r,uSpin:m.spin,uCharge:m.charge,uHorizon:m.horizon,uIsco:m.isco,uInner:profile.inner,uOuter:m.outer,uTime:simulationTime,uRg:m.rg*100,uDensityUnit:rhoUnit,uSpectrumReference:profile.reference,uTolerance:verification.tolerance??(quality?4e-5:1.5e-4),uChart:camera.chart,uRadialSpeed:profile.constants.radialSpeed,uElectronRatio:m.electronRatio||40,uMediumStep:verification.mediumStep??(quality?.45:1),uDiskCount:diskCount,uDiskSplit:profile.iscoIndex??0,uSkyRadius:m.skyRadius??150,uEmissionScale:verification.emissionEnabled===false?0:1,uFarStep:verification.farStep??.22,uInitialStep:verification.initialStep??(m.flow==="thermal"&&camera.r>m.outer?Math.max(.8,.1*(camera.r-m.outer)):.8)};
+      const observationTime=A.observationTime(state,m,camera),availableTime=metrics.latestSimulationTime??metrics.historyEndTime,simulationTime=m.recorded?Math.min(observationTime,availableTime):observationTime,rhoUnit=simulation?m.massRate/(simulation.metadata.accretionRateCode*m.rg*m.rg*A.constants.c)*.001:0;
+      const sourceOuter=m.flow==="grmhd3d"&&simulation?simulation.metadata.outerRadius:m.outer;
+      const values={uDistance:camera.r,uSpin:m.spin,uCharge:m.charge,uHorizon:m.horizon,uIsco:m.isco,uInner:profile.inner,uOuter:sourceOuter,uTime:simulationTime,uRg:m.rg*100,uDensityUnit:rhoUnit,uSpectrumReference:profile.reference,uTolerance:verification.tolerance??(quality?4e-5:1.5e-4),uChart:camera.chart,uRadialSpeed:profile.constants.radialSpeed,uElectronRatio:m.electronRatio||40,uMediumStep:verification.mediumStep??(quality?.45:1),uDiskCount:diskCount,uDiskSplit:profile.iscoIndex??0,uSkyRadius:m.skyRadius??150,uEmissionScale:verification.emissionEnabled===false?0:1,uFarStep:verification.farStep??.22,uInitialStep:verification.initialStep??(m.flow==="thermal"&&camera.r>m.outer?Math.max(.8,.1*(camera.r-m.outer)):.8)};
       for(const [name,value] of Object.entries(values))if(u[name]!=null)gl.uniform1f(u[name],value);
-      gl.uniform1i(u.uFlow,m.flow==="vacuum"?0:m.flow==="grmhd"?(simulation?2:0):1);
-      gl.uniform1i(u.uBand,["visible","xray","radio","bolometric"].indexOf(state.band));if(u.uPolarization!=null)gl.uniform1i(u.uPolarization,m.flow==="grmhd"||state.display!=="intensity"?1:0);
-      gl.uniform1i(u.uMaxSteps,verification.maxSteps??(quality?2048:1200));gl.uniform1i(u.uHotspot,state.scene==="hotspot"?1:0);gl.uniform1i(u.uSkyEnabled,verification.skyEnabled===false?0:1);
-      if(u.uTimes!=null){const frames=fluidFrameUniforms();if(simulation)gl.uniform2f(u.uGrid,simulation.metadata.radialStart,simulation.metadata.radialStep);else{frames.times[0]=0;frames.layers[0]=0;gl.uniform2f(u.uGrid,0,1);}gl.uniform1fv(u.uTimes,frames.times);if(u.uLayers)gl.uniform1iv(u.uLayers,frames.layers);gl.uniform1i(u.uFrameCount,frames.count);}
+      gl.uniform1i(u.uFlow,m.flow==="vacuum"?0:m.recorded?(simulation?2:0):1);
+      gl.uniform1i(u.uBand,["visible","xray","radio","bolometric"].indexOf(state.band));if(u.uPolarization!=null)gl.uniform1i(u.uPolarization,m.recorded||state.display!=="intensity"?1:0);
+      const planar=m.flow==="grmhd3d"&&m.spin===0&&m.charge===0&&!verification.forceTransportODE;
+      gl.uniform1i(u.uPlaneTransport,planar?1:0);metrics.screenTransport=planar?"schwarzschild-plane":"connection-ode";
+      // Deep interior orbital observers expose low-Killing-energy escape rays.
+      // Complete those longer affine paths with more steps, without relaxing
+      // integration tolerances or treating unfinished rays as captured.
+      const normalSteps=quality?2048:1200,raySteps=m.orbit&&camera.r<m.horizon?4096:normalSteps;
+      gl.uniform1i(u.uMaxSteps,verification.maxSteps??raySteps);gl.uniform1i(u.uHotspot,state.scene==="hotspot"?1:0);gl.uniform1i(u.uSkyEnabled,verification.skyEnabled===false?0:1);gl.uniform1i(u.uDiskStructure,m.diskStructure?1:0);
+      const metadata=simulation?.metadata;
+      gl.uniform1i(u.uAzimuthalCount,metadata?.resolution[2]??1);gl.uniform1f(u.uRadialCount,metadata?.resolution[0]??64);gl.uniform1f(u.uPolarCount,metadata?.resolution[1]??64);
+      gl.uniform1f(u.uPolarMinimum,metadata?.polarMinimum??0);gl.uniform1f(u.uPolarSpan,metadata?((metadata.polarMaximum??Math.PI)-(metadata.polarMinimum??0)):Math.PI);gl.uniform1f(u.uPhiMinimum,metadata?.phiMinimum??0);
+      gl.uniform1f(u.uGasGamma,metadata?.adiabaticIndex??5/3);gl.uniform1f(u.uAtmosMinimum,metadata?.densityFloor?.constant??0);gl.uniform1f(u.uAtmosCoefficient,metadata?.densityFloor?.coefficient??1e-7);gl.uniform1f(u.uAtmosPower,metadata?.densityFloor?.power??-1.5);
+      if(u.uTimes!=null){const frames=fluidFrameUniforms();if(metadata)gl.uniform2f(u.uGrid,metadata.radialStart,metadata.radialStep);else{frames.times[0]=0;frames.layers[0]=0;gl.uniform2f(u.uGrid,0,1);}gl.uniform1fv(u.uTimes,frames.times);if(u.uLayers)gl.uniform1iv(u.uLayers,frames.layers);gl.uniform1i(u.uFrameCount,frames.count);}
       sampler(p,"uDisk",0,diskTexture);sampler(p,"uSpectrum",1,spectrumTexture);sampler(p,"uBessel",2,besselTexture);sampler(p,"uTheta",3,thetaTexture);["uFluid","uVelocity","uMagnetic"].forEach((name,i)=>sampler(p,name,4+i,fluidTextures[i],true));
       if(u.uRefine!=null)gl.uniform1i(u.uRefine,refine?1:0);
       // WebGL checks active samplers even when uRefine disables their branch.
@@ -886,14 +989,21 @@
       }
       const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"trace",performance.now()-started,{interactive:!quality,regime:state.scene+":"+scalar,rays:width*height});
       metrics.geodesicBuilds++;metrics.traceWidth=width;metrics.traceHeight=height;metrics.raySamples=width*height;metrics.traceQuality=quality?"refined":"interactive";metrics.transferMode=scalar?"scalar-intensity":"full-stokes";metrics.geodesicStepper=verification.forceUnseededBS?"bs32-unseeded":"bs32-fsal";
-      metrics.observerDistance=camera.r;metrics.initialObserverDistance=m.initialObserverDistance??80;metrics.computationalRadius=m.outer;metrics.skyRadius=m.skyRadius??150;metrics.observerKind=state.observer;metrics.horizonFade=0;metrics.fluid=m.flow;metrics.observationTime=m.flow==="grmhd"?observationTime:null;metrics.simulationTime=m.flow==="grmhd"?simulationTime:null;metrics.waitingForData=m.flow==="grmhd"&&observationTime>availableTime+1e-6;metrics.movieEnded=m.flow==="grmhd"&&(metrics.continuationStatus==="unavailable"||metrics.continuationStatus==="failed")&&observationTime>=availableTime;metrics.cameraProperTime=camera.properTime;
+      metrics.observerDistance=camera.r;metrics.initialObserverDistance=m.initialObserverDistance??80;metrics.computationalRadius=m.outer;metrics.skyRadius=m.skyRadius??150;metrics.observerKind=state.observer;metrics.horizonFade=0;metrics.fluid=m.flow;metrics.observationTime=m.recorded?observationTime:null;metrics.simulationTime=m.recorded?simulationTime:null;metrics.waitingForData=m.recorded&&observationTime>availableTime+1e-6;metrics.movieEnded=m.recorded&&["unavailable","failed","finite-3d"].includes(metrics.continuationStatus)&&observationTime>=availableTime;metrics.cameraProperTime=camera.properTime;
       // Production readback is PBO/fence based; tests use readback() below to
       // obtain all channels synchronously and update exact status counts.
       diagnosticRequested=true;
     }
     function draw(size,seconds=0){
-      if(disposed||document.hidden)return;frameCounter++;const started=performance.now(),duration=lastWall===null?0:started-lastWall;lastWall=started;
+      if(disposed||document.hidden)return;
       const currentModel=sceneModel();
+      // A dense 3D ray can cost far more than one display refresh. Retain only
+      // one submitted volume frame; camera/UI state keeps advancing and the
+      // next draw samples its newest event after this fence completes. Without
+      // this bound, eased zoom queues hundreds of obsolete traces before GPU
+      // timing can adapt, eventually exhausting the driver's work queue.
+      if(volumeBackpressure&&currentModel.flow==="grmhd3d"&&volumeFence)return;
+      frameCounter++;const started=performance.now(),duration=lastWall===null?0:started-lastWall;lastWall=started;
       if(currentModel.flow==="grmhd"&&simulation&&continuation){
         const solverActive=!state.paused&&!document.hidden;
         continuation.setActive(solverActive);
@@ -902,8 +1012,8 @@
       // Idle drift advances the camera azimuth continuously, so the retrace gate
       // quantizes it to driftStep (about DRIFT_RETRACE_PIXELS output pixels) rather
       // than to a fixed angle. View changes coarser than that still retrace exactly.
-      const azimuth=Math.round((state.yaw+(state.drift||0))/Math.max(1e-9,driftStep)),key=[state.scene,state.model,state.spin,state.charge,state.tilt,state.viewZoom,state.flightRadius,state.flightLens,azimuth,state.band,state.observer,state.display,state.density,size.width,size.height,size.scale].join(":");
-      const evolving=A.scenes[state.scene]?.flow==="grmhd"||state.scene==="hotspot",changed=key!==geometryKey,active=Boolean(state.interacting||(evolving&&!state.paused));
+      const azimuth=Math.round((state.yaw+(state.drift||0))/Math.max(1e-9,driftStep)),key=[state.scene,state.model,state.spin,state.charge,state.tilt,state.viewZoom,state.flightRadius,state.flightLens,azimuth,state.band,state.observer,state.look,state.display,state.density,size.width,size.height,size.scale].join(":");
+      const evolving=currentModel.recorded||state.scene==="hotspot"||Boolean(currentModel.diskStructure),changed=key!==geometryKey,active=Boolean(state.interacting||(evolving&&!state.paused));
       if(changed){geometryKey=key;refinementDue=Boolean(state.paused&&!state.interacting);clearTimeout(timer);if(!active&&!state.paused)timer=setTimeout(()=>{refinementDue=true;onNeedsFrame();},180);}
       // Settling a drag, pausing playback and switching the budget can change
       // required quality without changing camera geometry. Compare quality to
@@ -944,14 +1054,19 @@
       gl.uniform2f(displayProgram.u.uOutput,size.width,size.height);gl.uniform1i(displayProgram.u.uDither,enhanced?1:0);gl.uniform1f(displayProgram.u.uExposure,(state.exposure||1)*displayGain);
       gl.uniform1i(displayProgram.u.uBand,["visible","xray","radio","bolometric"].indexOf(state.band));gl.uniform1i(displayProgram.u.uDisplay,["intensity","linear","circular","accuracy"].indexOf(state.display));const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"composite",performance.now()-compositeStarted);
       if(!verification.disableTimers){const fence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);enqueueJob({kind:"endToEnd",fence,start:started,version:renderVersion,frame:frameCounter});gl.flush();}else timing("endToEnd",performance.now()-started,"cpu-submission",renderVersion,frameCounter);
+      if(volumeBackpressure&&currentModel.flow==="grmhd3d"){
+        volumeFence=gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE,0);metrics.volumeGpuBusy=true;gl.flush();
+        if(!gpuPollTimer)gpuPollTimer=setTimeout(pollGpuJobs,8);
+      }
       displayKey=nextDisplayKey;metrics.displayGain=displayGain;metrics.radianceReference=profile.reference;metrics.frames++;metrics.composites++;
     }
     function resetSimulation(){
       dynamicFrames.clear();invalidateFluidFrameCache();geometryKey="";metrics.latestSimulationTime=metrics.historyEndTime;metrics.solverProgressTime=metrics.historyEndTime;metrics.observationTime=null;metrics.simulationTime=null;metrics.historyMissing=false;metrics.waitingForData=false;
+      if(metrics.dataStatus==="error")profileKey="";
       continuation?.reset();onNeedsFrame();
     }
     function setSolverActive(value){continuation?.setActive(Boolean(value));}
-    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);clearTimeout(diagnosticTimer);continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();deleteTarget(glowTarget);glowTarget=null;textures.forEach(t=>gl.deleteTexture(t));textures.clear();metrics.registeredTextures=0;resources.reverse().forEach(f=>f());}
+    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);clearTimeout(diagnosticTimer);if(volumeFence)gl.deleteSync(volumeFence);volumeFence=null;continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();deleteTarget(glowTarget);glowTarget=null;textures.forEach(t=>gl.deleteTexture(t));textures.clear();metrics.registeredTextures=0;resources.reverse().forEach(f=>f());}
     return {kind:"webgl",physical:true,metrics,count:()=>metrics.raySamples,draw,resetSimulation,setSolverActive,refine(){refinementDue=true;onNeedsFrame();},dispose,
       // Full synchronous test readback intentionally waits for GPU completion;
       // production diagnostics above never issue a blocking typed-array read.

@@ -1,0 +1,37 @@
+--- a/src/eos/adiabatic_mhd_gr.cpp
++++ b/src/eos/adiabatic_mhd_gr.cpp
+@@ -21,6 +21,10 @@
+ #include "../mesh/mesh.hpp"                // MeshBlock
+ #include "../parameter_input.hpp"          // ParameterInput
+ #include "eos.hpp"
++
++bool interstellar_eos_audit_active = false;
++int interstellar_eos_audit_fail_after = -1;
++int interstellar_eos_audit_calls = 0;
+ 
+ namespace {
+ // Declarations
+@@ -153,6 +157,8 @@
+ 
+         // Set primitives
+         Real gamma, pmag;
++        // Test-only poison makes the failed-call output contract deterministic.
++        if (interstellar_eos_audit_active) { gamma = 17.0; pmag = 1.0e30; }
+         bool success = ConservedToPrimitiveNormal(normal_dd_, normal_ee_, normal_mm_,
+                                                   normal_bb_, normal_tt_, gamma_adi,
+                                                   prim_old(IPR,k,j,i), k, j, i, prim,
+@@ -449,6 +455,14 @@
+     const AthenaArray<Real> &mm_vals, const AthenaArray<Real> &bb_vals,
+     const AthenaArray<Real> &tt_vals, Real gamma_adi, Real pgas_old, int k, int j, int i,
+     AthenaArray<Real> &prim, Real *p_gamma_lor, Real *p_pmag) {
++  if (interstellar_eos_audit_active) {
++    ++interstellar_eos_audit_calls;
++    if (interstellar_eos_audit_fail_after == 0) {
++      interstellar_eos_audit_fail_after = -1;
++      return false;
++    }
++    if (interstellar_eos_audit_fail_after > 0) --interstellar_eos_audit_fail_after;
++  }
+   // Parameters
+   const int max_iterations = 15;
+   const Real tol = 1.0e-12;

@@ -94,7 +94,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   // Toggling an inner disclosure must never close the outer panel or change
   // the observation expansion state exposed through WebMCP.
   await page.locator('#imaging-group > summary').click();assert.equal((await observe()).controlsExpanded,true);await page.locator('#imaging-group > summary').click();
-  assert.equal(await page.locator('#scene-choice option').count(),10);
+  assert.equal(await page.locator('#scene-choice option').count(),12);
   // Actual effective parameters own customization. Display-only/camera changes
   // cannot make the preset appear modified; returning physics clears it.
   await configure({exposure:1.2,zoom:1.1,display:'accuracy',density:16000});assert.equal((await observe()).presetCustomized,false);

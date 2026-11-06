@@ -1,0 +1,66 @@
+--- a/src/pgen/gr_torus.cpp
++++ b/src/pgen/gr_torus.cpp
+@@ -11,6 +11,7 @@
+ // C++ headers
+ #include <algorithm>  // max, min
+ #include <cmath>      // abs, acos, atan2, cos, exp, hypot, log, NAN, pow, sin, sqrt
++#include <cstdio>
+ #include <cstdlib>    // exit (needed for defs.hpp)
+ #include <cstring>    // strcmp
+ #include <iostream>   // cout (needed for defs.hpp), endl
+@@ -640,6 +641,55 @@
+ //     1,k,j,i: pmag (fluid-frame magnetic pressure, if magnetic fields enabled)
+ 
+ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
++
++  // Test-only 3D normal-field contract. This block is never part of a production run.
++  static bool normal_field_audited = false;
++  if (gid == 0 && !normal_field_audited) {
++    normal_field_audited = true;
++    if (block_size.nx2 < 3 || block_size.nx3 < 2 || a != 0.0) {
++      std::fprintf(stderr, "INDUCTION_SENTINEL invalid test geometry\n");
++      std::exit(43);
++    }
++    const int n1 = pfield->b.x1f.GetDim1();
++    const int n2 = pfield->b.x2f.GetDim2();
++    const int n3 = pfield->b.x3f.GetDim3();
++    AthenaArray<Real> face, left, right, normal;
++    face.NewAthenaArray(n3, n2, n1);
++    left.NewAthenaArray(NWAVE, n1);
++    right.NewAthenaArray(NWAVE, n1);
++    normal.NewAthenaArray(n1);
++    for (int kk = 0; kk < n3; ++kk) {
++      for (int jj = 0; jj < n2; ++jj) {
++        for (int ii = 0; ii < n1; ++ii) {
++          face(kk,jj,ii) = 1.0 + 0.1*kk + 0.01*jj + 0.001*ii;
++        }
++      }
++    }
++    const int kk = ks + 1, jj = js + 2, ii = is + block_size.nx1/2;
++    for (int axis = 1; axis <= 3; ++axis) {
++      for (int n = 0; n < NWAVE; ++n) {
++        left(n,ii) = right(n,ii) = 0.0;
++      }
++      left(IDN,ii) = right(IDN,ii) = 1.0;
++      left(IPR,ii) = right(IPR,ii) = 0.01;
++      Real radius = axis == 1 ? pcoord->x1f(ii) : pcoord->x1v(ii);
++      Real theta = axis == 2 ? pcoord->x2f(jj) : pcoord->x2v(jj);
++      Real alpha = 1.0/std::sqrt(1.0 + 2.0*m/radius);
++      Real expected = face(kk,jj,ii);
++      if (axis == 1) pcoord->PrimToLocal1(kk,jj,ii,ii,face,left,right,normal);
++      if (axis == 2) {
++        expected *= alpha*radius;
++        pcoord->PrimToLocal2(kk,jj,ii,ii,face,left,right,normal);
++      }
++      if (axis == 3) {
++        expected *= alpha*radius*std::sin(theta);
++        pcoord->PrimToLocal3(kk,jj,ii,ii,face,left,right,normal);
++      }
++      Real error = std::abs(normal(ii)/expected - 1.0);
++      std::fprintf(stderr, "INDUCTION_SENTINEL axis=%d k=%d j=%d i=%d actual=%.17g expected=%.17g relative_error=%.17g\n", axis,kk,jj,ii,normal(ii),expected,error);
++      if (!std::isfinite(error) || error > 2.0e-12) std::exit(42);
++    }
++  }
+   // Prepare scratch arrays
+   AthenaArray<Real> &g = ruser_meshblock_data[0];
+   AthenaArray<Real> &gi = ruser_meshblock_data[1];

@@ -1,0 +1,242 @@
+diff --git a/src/coordinates/kerr-schild.cpp b/src/coordinates/kerr-schild.cpp
+index d1a92d0..174eb57 100644
+--- a/src/coordinates/kerr-schild.cpp
++++ b/src/coordinates/kerr-schild.cpp
+@@ -1058,7 +1058,7 @@ void Coordinates::Face3Metric(const int k, const int j, const int il, const int
+ // Inputs:
+ //   k,j: phi- and theta-indices
+ //   il,iu: r-index bounds
+-//   bb1: 1D array of normal components B^1 of magnetic field, in global coordinates
++//   bb1: 3D face-field array of normal components B^1 of magnetic field, in global coordinates
+ //   prim_l: 1D array of left primitives, using global coordinates
+ //   prim_r: 1D array of right primitives, using global coordinates
+ // Outputs:
+@@ -1150,8 +1150,8 @@ void Coordinates::PrimToLocal1(
+       Real u3_r = uu3_r;
+ 
+       // Extract global magnetic fields
+-      const Real &bb1_l = bb1(i);
+-      const Real &bb1_r = bb1(i);
++      const Real &bb1_l = bb1(k,j,i);
++      const Real &bb1_r = bb1(k,j,i);
+       Real &bb2_l = prim_l(IBY,i);
+       Real &bb3_l = prim_l(IBZ,i);
+       Real &bb2_r = prim_r(IBY,i);
+@@ -1201,7 +1201,7 @@ void Coordinates::PrimToLocal1(
+ // Inputs:
+ //   k,j: phi- and theta-indices
+ //   il,iu: r-index bounds
+-//   bb2: 1D array of normal components B^2 of magnetic field, in global coordinates
++//   bb2: 3D face-field array of normal components B^2 of magnetic field, in global coordinates
+ //   prim_l: 1D array of left primitives, using global coordinates
+ //   prim_r: 1D array of right primitives, using global coordinates
+ // Outputs:
+@@ -1292,8 +1292,8 @@ void Coordinates::PrimToLocal2(
+       Real u3_r = uu3_r;
+ 
+       // Extract global magnetic fields
+-      const Real &bb2_l = bb2(i);
+-      const Real &bb2_r = bb2(i);
++      const Real &bb2_l = bb2(k,j,i);
++      const Real &bb2_r = bb2(k,j,i);
+       Real &bb3_l = prim_l(IBY,i);
+       Real &bb1_l = prim_l(IBZ,i);
+       Real &bb3_r = prim_r(IBY,i);
+@@ -1343,7 +1343,7 @@ void Coordinates::PrimToLocal2(
+ // Inputs:
+ //   k,j: phi- and theta-indices
+ //   il,iu: r-index bounds
+-//   bb3: 1D array of normal components B^3 of magnetic field, in global coordinates
++//   bb3: 3D face-field array of normal components B^3 of magnetic field, in global coordinates
+ //   prim_l: 1D array of left primitives, using global coordinates
+ //   prim_r: 1D array of right primitives, using global coordinates
+ // Outputs:
+@@ -1434,8 +1434,8 @@ void Coordinates::PrimToLocal3(
+       Real u3_r = uu3_r;
+ 
+       // Extract global magnetic fields
+-      const Real &bb3_l = bb3(i);
+-      const Real &bb3_r = bb3(i);
++      const Real &bb3_l = bb3(k,j,i);
++      const Real &bb3_r = bb3(k,j,i);
+       Real &bb1_l = prim_l(IBY,i);
+       Real &bb2_l = prim_l(IBZ,i);
+       Real &bb1_r = prim_r(IBY,i);
+diff --git a/src/outputs/vtk.cpp b/src/outputs/vtk.cpp
+index 7e8fce0..fd9fe19 100644
+--- a/src/outputs/vtk.cpp
++++ b/src/outputs/vtk.cpp
+@@ -110,7 +110,7 @@ void VTKOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin, bool flag) {
+     std::fprintf(pfile, "# vtk DataFile Version 2.0\n");
+ 
+     //  2. Header
+-    std::fprintf(pfile, "# Athena++ data at time=%e", pm->time);
++    std::fprintf(pfile, "# Athena++ data at time=%.17g", pm->time);
+     std::fprintf(pfile, "  cycle=%d", pmb->pmy_mesh->ncycle);
+     std::fprintf(pfile, "  variables=%s \n", output_params.variable.c_str());
+ 
+diff --git a/src/pgen/gr_torus.cpp b/src/pgen/gr_torus.cpp
+index aba432c..4908c5e 100644
+--- a/src/pgen/gr_torus.cpp
++++ b/src/pgen/gr_torus.cpp
+@@ -35,7 +35,7 @@
+ #endif
+ 
+ // Declarations
+-enum class MagneticFieldConfigs {density, loops};
++enum class MagneticFieldConfigs {density, loops, vertical};
+ void InflowBoundary(MeshBlock *pmb, Coordinates *pcoord, AthenaArray<Real> &prim,
+     FaceField &bb, Real time, Real dt, int il, int iu, int jl, int ju, int kl, int ku,
+     int ngh);
+@@ -162,6 +162,15 @@ void Mesh::InitUserMeshData(ParameterInput *pin) {
+       if (tilt != 0.0) {
+         pot_samples = pin->GetReal("problem", "pot_samples");
+       }
++    } else if (field_config_str == "vertical") {
++      // The aligned Schwarzschild spatial Wald potential is the validated
++      // net-vertical-flux seed. Kerr/tilted electric fields need a separate model.
++      if (a != 0.0 || tilt != 0.0) {
++        std::stringstream msg;
++        msg << "vertical field seed requires a=0 and tilt_angle=0" << std::endl;
++        ATHENA_ERROR(msg);
++      }
++      field_config = MagneticFieldConfigs::vertical;
+     } else {
+       std::stringstream msg;
+       msg << "### FATAL ERROR in Problem Generator\n"
+@@ -255,9 +264,23 @@ void Mesh::UserWorkAfterLoop(ParameterInput *pin) {
+ void MeshBlock::InitUserMeshBlockData(ParameterInput *pin) {
+   // Allocate space for user output variables
+   if (MAGNETIC_FIELDS_ENABLED) {
+-    AllocateUserOutputVariables(2);
++    AllocateUserOutputVariables(16);
+     SetUserOutputVariableName(0, "gamma");
+     SetUserOutputVariableName(1, "pmag");
++    SetUserOutputVariableName(2, "divB");
++    SetUserOutputVariableName(3, "velocity_norm_error");
++    SetUserOutputVariableName(4, "magnetic_orthogonality_error");
++    SetUserOutputVariableName(5, "ut");
++    SetUserOutputVariableName(6, "ur");
++    SetUserOutputVariableName(7, "utheta");
++    SetUserOutputVariableName(8, "uphi");
++    SetUserOutputVariableName(9, "bt");
++    SetUserOutputVariableName(10, "br");
++    SetUserOutputVariableName(11, "btheta");
++    SetUserOutputVariableName(12, "bphi");
++    SetUserOutputVariableName(13, "relative_divB");
++    SetUserOutputVariableName(14, "r_center");
++    SetUserOutputVariableName(15, "theta_center");
+   } else {
+     AllocateUserOutputVariables(1);
+     SetUserOutputVariableName(0, "gamma");
+@@ -415,13 +438,14 @@ void MeshBlock::ProblemGenerator(ParameterInput *pin) {
+           uu3 = u3 - gi(I03,i) / gi(I00,i) * u0;
+         }
+ 
+-        // Set primitive values, including cylindrically symmetric radial velocity
+-        // perturbations
++        // Seed non-axisymmetric radial perturbations once. Subsequent density,
++        // momentum, energy and magnetic structure comes from the 3D GRMHD solve.
+         Real rr_bl = r_bl * sth_bl_t;
+         Real z_bl = r_bl * cth_bl_t;
+         Real amp_rel = 0.0;
+         if (in_torus) {
+           amp_rel = pert_amp * std::sin(pert_kr * rr_bl) * std::cos(pert_kz * z_bl);
++          amp_rel *= (std::sin(3.0 * ph) + 0.5 * std::cos(7.0 * ph)) / 1.5;
+         }
+         Real amp_abs = amp_rel * uu3;
+         Real pert_uur = rr_bl / r_bl * amp_abs;
+@@ -672,6 +696,30 @@ void MeshBlock::UserWorkBeforeOutput(ParameterInput *pin) {
+         Real b_sq = b0 * b_0 + b1 * b_1 + b2 * b_2 + b3 * b_3;
+         if (MAGNETIC_FIELDS_ENABLED) {
+           user_out_var(1,k,j,i) = b_sq / 2.0;
++          // Measure divergence from the native staggered CT faces, before
++          // float32 visualization export or any interpolation of the fields.
++          Real flux = pcoord->GetFace1Area(k,j,i+1) * pfield->b.x1f(k,j,i+1)
++              - pcoord->GetFace1Area(k,j,i) * pfield->b.x1f(k,j,i)
++              + pcoord->GetFace2Area(k,j+1,i) * pfield->b.x2f(k,j+1,i)
++              - pcoord->GetFace2Area(k,j,i) * pfield->b.x2f(k,j,i)
++              + pcoord->GetFace3Area(k+1,j,i) * pfield->b.x3f(k+1,j,i)
++              - pcoord->GetFace3Area(k,j,i) * pfield->b.x3f(k,j,i);
++          Real divergence = std::abs(flux / pcoord->GetCellVolume(k,j,i));
++          user_out_var(2,k,j,i) = divergence;
++          user_out_var(3,k,j,i) = std::abs(u0*u_0 + u1*u_1 + u2*u_2 + u3*u_3 + 1.0);
++          user_out_var(4,k,j,i) = std::abs(u0*b_0 + u1*b_1 + u2*b_2 + u3*b_3);
++          user_out_var(5,k,j,i) = u0;
++          user_out_var(6,k,j,i) = u1;
++          user_out_var(7,k,j,i) = u2;
++          user_out_var(8,k,j,i) = u3;
++          user_out_var(9,k,j,i) = b0;
++          user_out_var(10,k,j,i) = b1;
++          user_out_var(11,k,j,i) = b2;
++          user_out_var(12,k,j,i) = b3;
++          user_out_var(13,k,j,i) = b_sq > 1.0e-30
++              ? divergence * pcoord->x1v(i) / std::sqrt(b_sq) : 0.0;
++          user_out_var(14,k,j,i) = pcoord->x1v(i);
++          user_out_var(15,k,j,i) = pcoord->x2v(j);
+         }
+       }
+     }
+@@ -1226,9 +1274,10 @@ void CalculateVelocityInTiltedTorus(Real r, Real th, Real ph, Real *p_ut, Real *
+ 
+ namespace {
+ Real IntegratedA1(Real x1_m, Real x1_p, Real x2, Real x3) {
+-  // Multiple loops and density isocontour configurations
++  // Supported magnetic-potential configurations
+   if (field_config == MagneticFieldConfigs::density
+-      || field_config == MagneticFieldConfigs::loops) {
++      || field_config == MagneticFieldConfigs::loops
++      || field_config == MagneticFieldConfigs::vertical) {
+     // Closed form in spherical Kerr-Schild coordinates
+     if (std::strcmp(COORDINATE_SYSTEM, "kerr-schild") == 0) {
+       return 0.0;
+@@ -1266,9 +1315,10 @@ Real IntegratedA1(Real x1_m, Real x1_p, Real x2, Real x3) {
+ 
+ namespace {
+ Real IntegratedA2(Real x1, Real x2_m, Real x2_p, Real x3) {
+-  // Multiple loops and density isocontour configurations
++  // Supported magnetic-potential configurations
+   if (field_config == MagneticFieldConfigs::density
+-      || field_config == MagneticFieldConfigs::loops) {
++      || field_config == MagneticFieldConfigs::loops
++      || field_config == MagneticFieldConfigs::vertical) {
+     // Closed form for untilted disk in spherical Kerr-Schild coordinates
+     if (std::strcmp(COORDINATE_SYSTEM, "kerr-schild") == 0 && tilt == 0.0) {
+       return 0.0;
+@@ -1306,9 +1356,10 @@ Real IntegratedA2(Real x1, Real x2_m, Real x2_p, Real x3) {
+ 
+ namespace {
+ Real IntegratedA3(Real x1, Real x2, Real x3_m, Real x3_p) {
+-  // Multiple loops and density isocontour configurations
++  // Supported magnetic-potential configurations
+   if (field_config == MagneticFieldConfigs::density
+-      || field_config == MagneticFieldConfigs::loops) {
++      || field_config == MagneticFieldConfigs::loops
++      || field_config == MagneticFieldConfigs::vertical) {
+     // Closed form for untilted disk in spherical Kerr-Schild coordinates
+     if (std::strcmp(COORDINATE_SYSTEM, "kerr-schild") == 0 && tilt == 0.0) {
+       Real a_r, a_th, a_ph;
+@@ -1343,6 +1394,10 @@ Real IntegratedA3(Real x1, Real x2, Real x3_m, Real x3_p) {
+ //   p_a_1,p_a_2,p_a_3: values of A_1, A_2, and A_3 set
+ // Notes:
+ //   References Fishbone & Moncrief 1976, ApJ 207 962 (FM).
++//   field_config == vertical: For a=0, aligned with the black-hole axis:
++//     A_r = A_theta = 0, A_phi = 0.5 * pot_amp * r^2 sin(theta)^2.
++//     This net-flux seed extends through the atmosphere; CT still initializes
++//     the field from the same discrete curl of edge-integrated potentials.
+ //   field_config == density: In Kerr-Schild coordinates aligned with the torus:
+ //     A_r = 0,
+ //     A_{\theta'} = 0,
+@@ -1360,6 +1415,12 @@ void VectorPotential(Real x1, Real x2, Real x3, Real *p_a_1, Real *p_a_2, Real *
+   // Calculate spherical Kerr-Schild coordinates of cell
+   Real r, th, ph;
+   GetKerrSchildCoordinates(x1, x2, x3, &r, &th, &ph);
++  if (field_config == MagneticFieldConfigs::vertical) {
++    TransformCovariantFromKerrSchild(0.0, 0.0,
++        0.5 * pot_amp * SQR(r) * SQR(std::sin(th)),
++        x1, x2, x3, p_a_1, p_a_2, p_a_3);
++    return;
++  }
+   Real sth = std::sin(th);
+   Real cth = std::cos(th);
+   Real sph = std::sin(ph);

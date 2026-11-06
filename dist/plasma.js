@@ -3,6 +3,7 @@
 (() => {
   const c=2.99792458e10,e=4.80320471257e-10,me=9.1093837139e-28;
   const dataBase=typeof document!=="undefined"&&document.currentScript?.src?new URL("./data/",document.currentScript.src).href:"./data/";
+  const moduleUrl=typeof document!=="undefined"?document.currentScript?.src:null;
   const identity=()=>Array.from({length:4},(_,i)=>Array.from({length:4},(_,j)=>Number(i===j)));
   const multiply=(a,b)=>a.map(row=>b[0].map((_,j)=>row.reduce((s,v,k)=>s+v*b[k][j],0)));
   function besselK(order,x) {
@@ -17,10 +18,10 @@
     for(let i=0;i<count;i++){const theta=10**(-1.3+5.3*i/(count-1)),x=1/theta;data.set([besselK(0,x),besselK(1,x),besselK(2,x),theta],i*4);}return data;
   }
   function velocityTexture(records,metadata) {
-    const n=records.length/12,data=new Float32Array(n*4),a=metadata.spin;
+    const n=records.length/12,data=new Float32Array(n*4),a=metadata.spin,nr=metadata.resolution[0],nt=metadata.resolution[1];
     for(let i=0;i<n;i++){
-      const cell=i%4096,radial=Math.floor(cell/64),polar=cell%64,r=Math.exp(metadata.radialStart+(radial+.5)*metadata.radialStep),x=(polar+.5)/64;
-      const theta=Math.PI*x+.35*Math.sin(2*Math.PI*x),st=Math.sin(theta),ct=Math.cos(theta),f=2*r/(r*r+a*a*ct*ct),root=Math.sqrt(1+f),at=i*12;
+      const cell=i%(nr*nt),radial=Math.floor(cell/nt),polar=cell%nt,r=Math.exp(metadata.radialStart+(radial+.5)*metadata.radialStep),x=(polar+.5)/nt;
+      const theta=metadata.axisymmetric===false?metadata.polarMinimum+x*(metadata.polarMaximum-metadata.polarMinimum):Math.PI*x+.5*metadata.thetaSlope*Math.sin(2*Math.PI*x),st=Math.sin(theta),ct=Math.cos(theta),f=2*r/(r*r+a*a*ct*ct),root=Math.sqrt(1+f),at=i*12;
       const ut=records[at+4],ur=records[at+5],uth=records[at+6],uph=records[at+7],gamma=ut/root;
       const spatial=[ur*st+uth*r*ct-uph*a*st,uth*a*ct+uph*r*st,ur*ct-uth*r*st];
       const v=[spatial[0]/gamma+f*st/root,spatial[1]/gamma,spatial[2]/gamma+f*ct/root],along=v[0]*st+v[2]*ct;
@@ -83,22 +84,59 @@
     const coefficients=[(l2*l2*ch+l1*l1*co)/den,(l2*l2*sh+l1*l1*si)/den,(ch-co)/den,(sh-si)/den];
     return id.map((row,i)=>row.map((v,j)=>coefficients[0]*v+coefficients[1]*J[i][j]+coefficients[2]*J2[i][j]+coefficients[3]*J3[i][j]));
   }
-  let cachedSimulation=null;
-  async function readSimulation() {
-    const [metadataResponse,dataResponse]=await Promise.all([fetch(dataBase+"grmhd-torus.json"),fetch(dataBase+"grmhd-torus.f32.gz")]);
-    if(!metadataResponse.ok||!dataResponse.ok)throw new Error("GRMHD data request failed");
+  const cachedSimulations=new Map();
+  async function readSimulation(dataset) {
+    const metadataResponse=await fetch(dataBase+dataset+".json");
+    if(!metadataResponse.ok)throw new Error("GRMHD data request failed");
     const metadata=await metadataResponse.json();
+    const dimensions=dataset==="grmhd3d"?3:2;
+    if(!metadata||typeof metadata!=="object"||!Array.isArray(metadata.resolution)||metadata.resolution.length!==dimensions||!metadata.resolution.every(value=>Number.isInteger(value)&&value>1)||!Array.isArray(metadata.times)||metadata.times.length<2||!metadata.times.every((value,i)=>Number.isFinite(value)&&(i===0||value>metadata.times[i-1]))||!Array.isArray(metadata.components)||metadata.components.length!==12||!Number.isFinite(metadata.radialStart)||!(metadata.radialStep>0)||!Number.isFinite(metadata.spin)||!(metadata.adiabaticIndex>1&&metadata.adiabaticIndex<=2)||metadata.bytes!==metadata.resolution.reduce((a,b)=>a*b,1)*metadata.times.length*12*4)throw new Error("Invalid GRMHD metadata");
+    if(dimensions===3&&(metadata.axisymmetric!==false||!(metadata.polarMinimum>=0)||!(metadata.polarMaximum>metadata.polarMinimum)||metadata.polarMaximum>Math.PI||!Number.isFinite(metadata.phiMinimum)))throw new Error("Invalid three-dimensional GRMHD coordinates");
+    if(dimensions===3&&(!Number.isFinite(metadata.observationStart)||metadata.observationStart<metadata.times[0]||metadata.observationStart>metadata.times[metadata.times.length-1]))throw new Error("Invalid GRMHD observation window");
     if(!globalThis.DecompressionStream)throw new Error("This browser cannot decompress the GRMHD movie");
     // SubtleCrypto exists only in secure contexts; without this check a plain-http
     // preview fails with a TypeError that reads like a corrupt movie.
     if(!globalThis.crypto?.subtle)throw new Error("Checking the GRMHD movie hash needs a secure context (https or localhost)");
-    const buffer=await new Response(dataResponse.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+    const readBlock=async file=>{
+      const response=await fetch(dataBase+file);if(!response.ok)throw new Error("GRMHD data request failed");
+      return new Response(response.body.pipeThrough(new DecompressionStream("gzip"))).arrayBuffer();
+    };
+    let buffer;
+    if(dataset==="grmhd3d"&&Array.isArray(metadata.chunks)){
+      buffer=new ArrayBuffer(metadata.bytes);const destination=new Uint8Array(buffer);let offset=0;
+      for(const chunk of metadata.chunks){
+        if(!/^grmhd3d-\d+-[0-9a-f]{12}\.f32\.gz$/.test(chunk.file)||chunk.offset!==offset||!Number.isInteger(chunk.bytes)||chunk.bytes<=0||offset+chunk.bytes>metadata.bytes)throw new Error("Invalid GRMHD chunk manifest");
+        const block=await readBlock(chunk.file);
+        if(block.byteLength!==chunk.bytes)throw new Error("Incomplete GRMHD chunk");
+        const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",block)),x=>x.toString(16).padStart(2,"0")).join("");
+        if(digest!==chunk.sha256)throw new Error("GRMHD chunk integrity mismatch");
+        destination.set(new Uint8Array(block),offset);offset+=block.byteLength;
+      }
+      if(offset!==metadata.bytes)throw new Error("Incomplete GRMHD chunk manifest");
+    }else buffer=await readBlock(dataset+".f32.gz");
     if(buffer.byteLength!==metadata.bytes)throw new Error("Incomplete GRMHD movie");
     const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",buffer)),x=>x.toString(16).padStart(2,"0")).join("");
     if(digest!==metadata.sha256)throw new Error("GRMHD movie integrity mismatch");
     return {metadata,records:new Float32Array(buffer)};
   }
-  function loadSimulation(){if(!cachedSimulation)cachedSimulation=readSimulation().catch(error=>{cachedSimulation=null;throw error;});return cachedSimulation;}
+  function readVolumeInWorker(){
+    return new Promise((resolve,reject)=>{
+      // Decoding and converting a full 3D history must not block controls. This
+      // worker only prepares native-solver output; it is not a fluid solver.
+      const worker=new Worker(new URL("./grmhd3d-loader.js?v=b0dcb4bcacf0",moduleUrl));
+      worker.onmessage=event=>{worker.terminate();if(event.data.error)reject(new Error(event.data.error));else resolve(event.data);};
+      worker.onerror=event=>{worker.terminate();reject(new Error(event.message||"3D GRMHD loader failed"));};
+      worker.postMessage({moduleUrl});
+    });
+  }
+  function loadSimulation(dataset="grmhd-torus"){
+    if(!["grmhd-torus","grmhd3d"].includes(dataset))throw new Error("Unknown GRMHD dataset");
+    if(!cachedSimulations.has(dataset)){
+      const load=dataset==="grmhd3d"&&moduleUrl&&typeof Worker==="function"?readVolumeInWorker():readSimulation(dataset);
+      cachedSimulations.set(dataset,load.catch(error=>{cachedSimulations.delete(dataset);throw error;}));
+    }
+    return cachedSimulations.get(dataset);
+  }
   const glsl=`
     float plasmaPlanck(float nu,float t){
       // Scale radio frequencies before multiplication and use the small-x

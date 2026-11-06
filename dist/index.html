@@ -15,15 +15,15 @@
     <script src="./geodesics.js?v=3994483f3e19" defer></script>
     <script src="./navigation.js?v=409b42f65b6a" defer></script>
     <!-- Shared physical kernels precede the volume transfer solver and app state. -->
-    <script src="./relativity.js?v=b3c13102811b" defer></script>
-    <script src="./astrophysics.js?v=d0e19689771c" defer></script>
-    <script src="./plasma.js?v=a8086031977e" defer></script>
+    <script src="./relativity.js?v=3961be9ebb49" defer></script>
+    <script src="./astrophysics.js?v=a258790d3069" defer></script>
+    <script src="./plasma.js?v=f7925073b96f" defer></script>
     <!-- The continuation coordinator stays separate so finite-history fallback remains testable. -->
     <script src="./grmhd-continuation.js?v=21d6abd20a2e" defer></script>
     <!-- Refresh content hashes after shader or sampler edits so deployments load the matching render paths. -->
-    <script src="./physical-renderer.js?v=028ad593d3a3" defer></script>
+    <script src="./physical-renderer.js?v=b1dd38d82288" defer></script>
     <script src="./raytracer.js?v=352d044f1ce2" defer></script>
-    <script src="./app.js?v=c8375f622ec9" defer></script>
+    <script src="./app.js?v=81d187540498" defer></script>
   </head>
   <body>
     <main class="scene" id="scene" aria-label="黑洞观测站">
@@ -50,6 +50,8 @@
               <div class="preset-heading"><label for="scene-choice">场景预设</label><span id="preset-customized" class="preset-customized" hidden>已自定义</span></div>
               <select id="scene-choice" aria-describedby="preset-help preset-customized-help">
                 <option value="quasar">类星体 · 光学热盘</option>
+                <option value="plunge">史瓦西 · 绕行坠落</option>
+                <option value="grmhd3d">全局三维 GRMHD · 史瓦西</option>
                 <option value="stellar">恒星级 · X 射线热盘</option>
                 <option value="m87">M87* · 射电热流与喷流</option>
                 <option value="sgrA">银河系中心 · 射电热流</option>
@@ -99,7 +101,8 @@
             <details class="control-group" id="camera-group">
               <summary><span>镜头与播放</span><span class="group-meta">观察与旅程</span></summary>
               <div class="group-body">
-                <div class="choice"><label for="observer">观察者</label><select id="observer"><option value="infall" selected>自由落体轨迹</option><option value="static">视界外静止观察</option></select></div>
+                <div class="choice"><label for="observer">观察者</label><select id="observer" aria-describedby="observer-help"><option value="infall" selected>自由落体轨迹</option><option value="static">视界外静止观察</option></select><p id="observer-help" class="control-help">按固有时间沿自由落体轨迹移动，计算运动像差与频移。</p></div>
+                <div id="look-control" class="choice" hidden><label for="look">取景方向</label><select id="look" aria-describedby="look-help"><option value="flight">沿轨迹前方</option><option value="center">朝向黑洞</option><option value="outward">回望外界</option></select><p id="look-help" class="control-help">切换取景保留当前轨迹和速度；进入视界后可回望外界。</p></div>
                 <div class="segmented presets" role="group" aria-label="视角预设"><button type="button" data-preset="cinema" aria-pressed="false">电影视角</button><button type="button" data-preset="top" aria-pressed="false">俯瞰视角</button></div>
                 <div class="parameter"><div><label for="tilt">盘面仰角</label><output id="tilt-value" for="tilt">8°</output></div><input id="tilt" type="range" min="-89" max="89" value="8" step="0.5" /></div>
                 <div class="parameter"><div><label for="zoom">缩放倍率</label><output id="zoom-value" for="zoom">1.0 ×</output></div><input id="zoom" type="range" min="0.65" max="12" value="1" step="0.05" /></div>
@@ -115,11 +118,12 @@
               <div class="group-body">
                 <!-- Detailed solver readings live with model diagnostics so the
                      fixed action row stays usable on short phone viewports. -->
-                <div class="solver-readout" id="solver-readout" hidden aria-live="polite"><span id="solver-status">持续求解器准备中</span><span><output id="solver-latest">t=800</output> · <output id="solver-observation">观测 t=350</output> · <output id="solver-rate">0 GM/c³/s</output></span><span id="solver-history">历史完整</span><span id="solver-diagnostics">守恒与约束诊断等待中</span></div>
+                <div class="solver-readout" id="solver-readout" hidden aria-live="polite"><span id="solver-status">求解数据准备中</span><span id="solver-grid">网格与历史待校验</span><span><output id="solver-latest">等待计算数据</output> · <output id="solver-observation">观测时刻待选定</output> · <output id="solver-rate">准备中</output></span><span id="solver-history">历史待校验</span><span id="solver-diagnostics">守恒与约束诊断等待中</span></div>
                 <p>长度单位 r_g=GM/c²，时间单位 GM/c³。自适应光线积分在外部回溯时使用外向 Kerr–Schild 坐标，进入视界时使用入向坐标。有限盘厚与光路时延参与全部影像；纯强度热盘使用标量传输，偏振和热流使用四分量传输。更高阶穿盘持续积分，直到逃逸、捕获、光学厚度饱和或数值预算耗尽。</p>
                 <p>热盘采用有限内缘应力、气体／辐射混合压力与灰大气近似；散射只在局部有效消光中近似处理，不求解多次散射及非局部光场。可见光按黑体光谱和 CIE 色匹配函数积分。X 射线、射电、总辐射及圆偏振使用标明含义的显色。曝光用于显示，不代表光度标定。</p>
                 <p>热流与喷流使用本地生成的 64×64 轴对称 GRMHD 历史，固定 a=0.9375、Q=0；t=800 另有完整双精度检查点，播放接近历史边界时由单 Worker 分批进行守恒标量有限体积延拓并以最新完整状态成像。该延拓仍不宣称完整重新运行 iharm2d_v3，也不是持续演化的三维 GRMHD 或对 M87*、银河系中心的观测拟合。热点为规定的测试热源。带电模型用于理论对照。</p>
-                <p>自由落体沿 E=1、L=0 的轨迹选取观察位置；自动旅程按固有时间推进，并计算运动像差与频移。视界内仍追踪可抵达的外界光，不额外渐黑。兼容画面只提供粒子投影。</p>
+                <p>“全局三维 GRMHD”读取独立 Athena++ 求解器生成的密度、内能、四速度与磁场；按真实方位角和延迟发光时刻采样，不使用发光纹理扰动。当前只计算 230 GHz 热同步辐射，颜色为强度显色。网格、计算时长和原生约束见读数与数据来源；历史有限，不循环或外推。到达末时刻可重置三维场景，或继续独立求解器后更新数据。粗网格、极区裁切、有限历史和未计算辐射反馈均限制其适用范围，不宣称湍流统计已收敛。</p>
+                <p>通常自由落体采用 E=1、L=0；“史瓦西 · 绕行坠落”采用 E=1、L=3.995，从 80 r_g 出发，沿倾斜轨道绕行后跨越视界。该场景规定发光盘外缘为 25 r_g，局部发光结构随流体角速度转动，为保持环平均辐射通量的参数化扰动，未求解三维湍流。默认总辐射使用暖色强度显色，可切换可见光查看光谱颜色；不代表银河系中心的实测吸积流。相机轨迹和弯曲光路均在浏览器中计算，未使用预录视频。旅程按缩放的固有时间推进，并计算运动像差与频移。视界内仍追踪可抵达的外界光，不额外渐黑。兼容画面只提供粒子投影。</p>
                 <div class="readouts model-readouts"><div class="model-readout"><span>计算半径</span><output id="computational-radius-value">准备中</output></div><div class="model-readout"><span>初始观察距离</span><output id="observer-distance-value">准备中</output></div></div>
                 <p id="timing-source" class="control-help">计时来源：准备中</p>
                 <nav class="reference-list" aria-label="参考链接">
