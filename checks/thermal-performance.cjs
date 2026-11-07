@@ -1,14 +1,16 @@
 // Interleaved, warmed real-GPU comparison. Rotating the execution order keeps
 // browser/context warm-up and GPU clock changes from favoring one renderer.
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const engine=process.env.SIMULATION_BROWSER||'webkit';
+assert.ok(['firefox','webkit'].includes(engine),'Use headless Firefox or WebKit');
 const base=process.argv[2]||'http://127.0.0.1:8765',baseline=process.argv[3]||'http://127.0.0.1:8766';
 // A task-specific output folder preserves older hardware evidence when this
 // same fixed-budget benchmark is rerun against a fresh local baseline snapshot.
 const output=process.env.THERMAL_OUTPUT?path.resolve(process.env.THERMAL_OUTPUT):path.join(__dirname,'../verification/thermal');fs.mkdirSync(output,{recursive:true});
 const percentile=(values,f)=>[...values].sort((a,b)=>a-b)[Math.min(values.length-1,Math.floor(values.length*f))];
 (async()=>{
- const browser=await chromium.launch({executablePath:process.env.CHROME_EXECUTABLE||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true,args:['--use-angle=metal','--ignore-gpu-blocklist']});
+ const browser=await playwright[engine].launch({headless:true});
  const report={method:'12 warm-up + 31 measured samples per mode and variant at the unchanged production budget 128000 (interactive) / 256000 (refined); interleaved order rotates each round; GPU timer queries for trace/composite; synchronous 1-pixel readback and CPU clock for completed end-to-end (includes command-buffer round trip); unchanged frames report zero GPU submissions',variants:[],errors:[]};
  const descriptions=[{name:'baseline',url:baseline},{name:'optimized22',url:base,radius:26,farStep:.22},{name:'expanded22',url:base,radius:2048,farStep:.22}];
  try{

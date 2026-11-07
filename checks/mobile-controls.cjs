@@ -1,14 +1,16 @@
-// Run the real product page with the host's existing Playwright/Chrome runtime.
+// Run the real product page with the host's existing Playwright WebKit/Firefox runtime.
 // Phone emulation checks layout and interaction; it does not emulate Safari's
 // browser toolbar or replace the application's state, shaders, or event handlers.
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const engine=process.env.SIMULATION_BROWSER||'webkit';
+assert.ok(['firefox','webkit'].includes(engine),'Use headless Firefox or WebKit');
 const base=process.argv[2]||'http://127.0.0.1:8765';
 const output=path.join(__dirname,'../verification/mobile-controls');
-const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':undefined);
-const viewports=[{width:320,height:568},{width:320,height:480},{width:390,height:844},{width:390,height:520},{width:430,height:932},{width:430,height:568}];
+// Cover narrow, normal, short (including growing custom header), and wide layouts.
+const cases=[{scene:'quasar',width:320,height:568},{scene:'m87',width:390,height:844},{scene:'quasar',width:390,height:520},{scene:'m87',width:430,height:568}];
 const groups=['physics-group','imaging-group','camera-group','model-group'];
 const stateKeys=['scene','model','spin','charge','band','display','exposure','tilt','density','zoom','observer','paused','falling','presetCustomized'];
 const pickState=observation=>Object.fromEntries(stateKeys.map(key=>[key,observation[key]]));
@@ -17,8 +19,8 @@ const closeTo=(a,b,message)=>assert.ok(Math.abs(a-b)<=1,message+': '+a+' vs '+b)
 
 (async()=>{
   fs.mkdirSync(output,{recursive:true});
-  const browser=await chromium.launch({executablePath:executable,headless:true,args:process.platform==='darwin'?['--use-angle=metal','--ignore-gpu-blocklist']:['--enable-unsafe-swiftshader']});
-  const report={method:'Actual product DOM, native disclosures and production WebGL under Chromium touch/mobile emulation; 320/390/430px portrait and short viewports; immediate actual framebuffer readback detects blank composites; no Safari toolbar emulation',mobileSafariVerified:false,safariRuntime:'An actual iPhone Safari runtime is unavailable to this runner; Chromium emulation does not verify Safari toolbar/safe-area behavior.',cases:[],errors:[]};
+  const browser=await playwright[engine].launch({headless:true});
+  const report={browser:engine,version:browser.version(),method:'Actual product DOM, native disclosures and production WebGL under headless WebKit/Firefox touch emulation; representative normal, narrow, short and wide viewports; immediate actual framebuffer readback detects blank composites; no Safari toolbar emulation',mobileSafariVerified:false,safariRuntime:'An actual iPhone Safari runtime is unavailable to this runner; Headless emulation does not verify iPhone toolbar/safe-area behavior.',cases:[],errors:[]};
   let activePage;
   const initialize=async(context,unsupportedFullscreen=false)=>{
     const page=await context.newPage();activePage=page;
@@ -93,8 +95,8 @@ const closeTo=(a,b,message)=>assert.ok(Math.abs(a-b)<=1,message+': '+a+' vs '+b)
     return result;
   };
   try{
-    for(const viewport of viewports)for(const scene of ['quasar','m87']){
-      const context=await browser.newContext({viewport,deviceScaleFactor:1,isMobile:true,hasTouch:true,reducedMotion:'reduce'});
+    for(const {scene,...viewport} of cases){
+      const context=await browser.newContext({viewport,deviceScaleFactor:1,isMobile:engine==='webkit',hasTouch:true,reducedMotion:'reduce'});
       try{
         const page=await initialize(context);await configure(page,{scene,paused:true,density:16000,observer:'static',exposure:1.35,zoom:1.15});await settle(page);
         await page.locator('.control-toggle').click();
@@ -188,7 +190,7 @@ const closeTo=(a,b,message)=>assert.ok(Math.abs(a-b)<=1,message+': '+a+' vs '+b)
         report.failureCase={scene,viewport};throw error;
       }finally{await context.close();activePage=null;}
     }
-    const context=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1,isMobile:true,hasTouch:true,reducedMotion:'reduce'});
+    const context=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1,isMobile:engine==='webkit',hasTouch:true,reducedMotion:'reduce'});
     try{
       const page=await initialize(context,true);await configure(page,{paused:true,density:16000});await settle(page);await page.locator('.control-toggle').click();
       assert.equal(await page.locator('#fullscreen').isVisible(),false,'Unsupported fullscreen action remains visible');
@@ -198,7 +200,7 @@ const closeTo=(a,b,message)=>assert.ok(Math.abs(a-b)<=1,message+': '+a+' vs '+b)
       report.unsupportedFullscreen={actions,row};await page.screenshot({path:path.join(output,'unsupported-fullscreen.png')});
     }finally{await context.close();activePage=null;}
     assert.deepEqual(report.errors,[]);report.pass=true;
-    console.log('PASS: 12 mobile scene/viewport cases, header close separation, touch targets, native select fonts, scrolling, preserved state/focus, live resize image/cache and unsupported fullscreen.');
+    console.log('PASS: 4 representative mobile scene/viewport cases, header close separation, touch targets, native select fonts, scrolling, preserved state/focus, live resize image/cache and unsupported fullscreen.');
   }catch(error){
     report.pass=false;report.failure={message:String(error),stack:error.stack};
     if(activePage&&!activePage.isClosed())await activePage.screenshot({path:path.join(output,'failure.png')}).catch(()=>{});

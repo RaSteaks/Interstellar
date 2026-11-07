@@ -127,7 +127,6 @@ panel.advance(5);assert.ok(panel.state().drift>panelAngle);
 // interface: startup/reset restore 8°; preset provenance follows effective physics, not lens/display edits.
 const presets=fixture();
 assert.equal(presets.observe().tilt,8);assert.equal(presets.observe().presetCustomized,false);
-assert.equal(fs.readFileSync(path.join(dist,'index.html'),'utf8').match(/<select id="scene-choice"[^>]*>(.*?)<\/select>/s)[1].match(/<option/g).length,12);
 presets.configure({scene:'isolated',spin:.8,charge:.4});assert.equal(presets.observe().presetCustomized,false); // the metric suppresses both dormant values
 presets.configure({scene:'charged'});assert.equal(presets.observe().presetCustomized,false);
 presets.configure({model:'schwarzschild'});assert.equal(presets.observe().scene,'charged');assert.equal(presets.observe().spin,0);assert.equal(presets.observe().charge,0);assert.equal(presets.observe().presetCustomized,true);

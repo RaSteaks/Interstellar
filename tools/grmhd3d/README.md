@@ -122,12 +122,12 @@ python3 checks/grmhd3d-winding.py --source /path/to/configured/athena \
 python3 checks/grmhd3d-eos.py --source /path/to/eos-patched/athena \
   --input tools/grmhd3d/athinput.torus --output verification/grmhd3d/eos-check
 node checks/grmhd3d-data.cjs
-node checks/schwarzschild-screen.cjs
+node checks/physical-core.cjs  # includes Schwarzschild screen transport
 PLAYWRIGHT_MODULE=/path/to/playwright node checks/grmhd3d-sampling.cjs
-PLAYWRIGHT_MODULE=/path/to/playwright node checks/grmhd3d-screen.cjs
 PLAYWRIGHT_MODULE=/path/to/playwright node checks/grmhd3d-browser.cjs http://127.0.0.1:18786
 ```
 
+The full `grmhd3d-browser.cjs` suite includes the analytic/connection-ODE screen comparison.
 Browser tests use isolated headless WebKit or Firefox (`SIMULATION_BROWSER`),
 never Chrome or personal profiles. Native mesh invariants are measured before
 float32 export. Radiation-field interpolation is an additional approximation and

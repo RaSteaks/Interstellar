@@ -105,26 +105,46 @@ assert.ok(Math.max(...pair.hits.map(h=>h.shift))>Math.max(...mirror.hits.map(h=>
  assert.ok(momentumError>10*velocityError,`the momentum shortcut must be measurably worse (got ${momentumError.toFixed(4)} deg)`);
 }
 
-// Shaders carry no compiler in node: assert structural validity and that every
-// uniform name wired in raytracer.js is declared in some shader stage.
-const raytracer=fs.readFileSync(path.join(__dirname,'../dist/raytracer.js'),'utf8');
-assert.ok(/if\(escaped\)\{Geometry exit=metric\(x,uSpin\)/.test(raytracer),'the traced sky direction must use the coordinate velocity at the escape cutoff');
-const stages=[...raytracer.matchAll(/`#version 300 es[^`]*`/g)].map(match=>match[0]);
-// Direct particle drawing adds inverse-geometry and particle stages; there is
-// no emission-atlas stage, and geometry data alone must not contain disk light.
-assert.equal(stages.length,8);
-assert.ok(!/uAtlas|atlasProgram|atlasVertex|vec4 emission\(/.test(raytracer),'disk emission must be rendered by particles, not an emission texture');
-for(const stage of stages){
- for(const pairName of ['{}','()']){
-  const [open,close]=pairName;let depth=0;
-  for(const char of stage){
-   if(char===open)depth++;else if(char===close)depth--;
-   assert.ok(depth>=0,'unbalanced shader nesting');
-  }
-  assert.equal(depth,0,'unbalanced shader nesting');
+// Compatibility particle inflow; exercise production functions with independent physical oracles.
+{
+ // A finite injected inflow must be timelike and preserve its energy and angular
+ // momentum all the way to the numerical horizon cutoff, including the ergosphere.
+ for(let step=0;step<=95;step++) {
+   const spin=step/100,m=p.model({model:'kerr',spin}),c=p.plungeConstants(spin);
+   const profile=p.emissionProfile(spin),plunge=p.plungeProfile(spin);
+   assert.ok(m.emissionInner>m.horizon&&m.emissionInner<m.isco);
+   assert.ok(profile.flux.every(value=>Number.isFinite(value)&&value>=0));
+   assert.ok(p.sampleProfile(profile,m.isco)>0,'finite stress must keep ISCO luminous');
+   assert.equal(p.thinDiskFlux(m.isco,spin),0,'the zero-stress benchmark stays unchanged');
+   assert.ok(Number.isFinite(plunge.duration)&&plunge.duration>0);
+   for(let i=0;i<=80;i++) {
+     const r=m.emissionInner+(m.isco-m.emissionInner)*i/80;
+     const x=[Math.sqrt(r*r+spin*spin),0,0],geo=g.geometry(x,spin),u=g.emitterVelocity(x,spin),cov=g.lower(u,geo);
+     assert.ok(Math.abs(g.metricDot(u,u,geo)+1)<2e-7,`a=${spin}: emitter normalization at r=${r}`);
+     assert.ok(Math.abs(-cov[3]-c.energy)<2e-9,'plunge energy conservation');
+     assert.ok(Math.abs(x[0]*cov[1]-c.angularMomentum)<2e-9,'plunge angular momentum conservation');
+     assert.ok(p.flowVelocity(r,spin,c).ur<0,'infall never reverses');
+     // An outward photon has a finite past-directed covector in outgoing KS.
+     // Use the rationalized quadratic root to avoid cancellation at the horizon.
+     const n=geo.n[0],aa=1-geo.f*n*n,bb=2*geo.f*n,cc=.01-1-geo.f;
+     const momentum=[2*cc/(-bb+Math.sqrt(bb*bb-4*aa*cc)),0,.1];
+     const ray={x,p:momentum,energy:1};
+     assert.ok(Math.abs(g.hamiltonian(ray,spin))<1e-9,'outgoing photon is null');
+     const hit=g.hitRecord(x,momentum,1,spin);
+     assert.ok(hit&&hit.shift>0&&Number.isFinite(hit.shift));
+     if(i===0)assert.ok(hit.shift<.02,'near-horizon photons must fade by g^4 without a brightness floor');
+   }
+   for(let i=1;i<512;i++) {
+     assert.ok(plunge.data[i*4]<=plunge.data[(i-1)*4],'particle radius decreases monotonically');
+     assert.ok(plunge.data[i*4+1]>=plunge.data[(i-1)*4+1],'azimuth retains prograde motion');
+   }
+   const epsilon=1e-6;
+   assert.ok(Math.abs(p.sampleProfile(profile,m.isco-epsilon)-p.sampleProfile(profile,m.isco+epsilon))<1e-4,'emission has no ISCO step');
+   const seed=[.37,1.2,.1,.46];
+   const start=p.particleOrbit(seed,0,0,profile,plunge),later=p.particleOrbit(seed,0,.01,profile,plunge);
+   assert.ok(later.r<start.r,'live plunge particles move inward');
+   const circular=p.particleOrbit(seed,1,0,profile,plunge),orbited=p.particleOrbit(seed,1,.01,profile,plunge);
+   assert.equal(circular.r,orbited.r);assert.ok(orbited.phi>circular.phi);
  }
 }
-for(const name of raytracer.matchAll(/program\([^,]+,[^,]+,\[([^\]]*)\]/g)){
- for(const uniform of name[1].matchAll(/"([^"]+)"/g))assert.ok(raytracer.includes(`uniform ${/\b(u[A-Z])/.test(uniform[1])?'':'sampler2D '}${uniform[1]}`)||new RegExp(`uniform [\\w\\s,]*\\b${uniform[1]}\\b`).test(raytracer),`undeclared uniform ${uniform[1]}`);
-}
-console.log('PASS: 96 disk profiles, observer tetrads, null initial rays, Hamiltonian gradients, conserved escaping rays, Schwarzschild capture boundary, sampled disk crossings, sky escape behind two disk hits, Kerr cache-limit counterexamples, Doppler asymmetry and shader structure.');
+console.log('PASS: 96 disk profiles, observer tetrads, null initial rays, Hamiltonian gradients, conserved escaping rays, Schwarzschild capture boundary, sampled disk crossings, sky escape behind two disk hits, Kerr cache-limit counterexamples, Doppler asymmetry and compatibility particle inflow, E/L conservation, horizon redshift and live particle motion.');

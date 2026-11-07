@@ -3,13 +3,14 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const engine=process.env.SIMULATION_BROWSER||'webkit';
+assert.ok(['firefox','webkit'].includes(engine),'Use headless Firefox or WebKit');
 const base=process.argv[2]||'http://127.0.0.1:8765';
 const output=path.join(__dirname,'../verification/render-performance');
-const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':undefined);
 
 (async()=>{
-  const browser=await chromium.launch({executablePath:executable,headless:true,args:process.platform==='darwin'?['--use-angle=metal','--ignore-gpu-blocklist']:['--enable-unsafe-swiftshader']});
+  const browser=await playwright[engine].launch({headless:true});
   const errors=[];let result;
   try{
     const page=await browser.newPage({viewport:{width:800,height:650}});

@@ -4,23 +4,16 @@ const path=require('node:path');
 const vm=require('node:vm');
 const context={AbortController,setTimeout,clearTimeout};
 vm.createContext(context);
-for(const name of ['navigation.js','geodesics.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../dist',name),'utf8'),context);
-const nav=context.BlackHoleNavigation,geo=context.BlackHoleGeodesics;
+for(const name of ['navigation.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'../dist',name),'utf8'),context);
+const nav=context.BlackHoleNavigation;
 const near=(a,b,tolerance=1e-10)=>assert.ok(Math.abs(a-b)<tolerance,`${a} != ${b}`);
 
-// The complete journey is monotone and finite; its mathematical observers stay timelike.
+// Navigation owns zoom mapping; numerical observer contracts live in the physics suites.
 let previous=nav.view(nav.limits.min);
 for(let i=0;i<=200;i++){
  const zoom=nav.limits.min*(nav.limits.max/nav.limits.min)**(i/200),view=nav.view(zoom);
  assert.ok(view.distance<=previous.distance+1e-9 && view.fade>=previous.fade-1e-9);
  assert.ok(view.distance>=3-1e-9 && view.distance<=80);
- for(const spin of [0,.65,.95])for(const tilt of [8,18,78]){
-  const camera=geo.observer(spin,tilt,view.distance);
-  assert.ok(camera.geo.f<1);
-  near(geo.metricDot(camera.u,camera.u,camera.geo),-1);
-  for(const basis of camera.basis){near(geo.metricDot(basis,basis,camera.geo),1);near(geo.metricDot(camera.u,basis,camera.geo),0);}
-  const ray=geo.initialRay(camera,.1,.2);near(geo.hamiltonian(ray,spin),0);
- }
  previous=view;
 }
 near(nav.view(1).distance,80);near(nav.view(12).distance,3);
@@ -103,4 +96,4 @@ surface.fire('wheel',{ctrlKey:true,deltaY:2000});assert.equal(state.zoom,.65);
 surface.fire('pointerdown',{pointerId:3});input.cancel();assert.equal(surface.capture.size,0);assert.equal(input.active,false);
 input.dispose();const lastZoom=state.zoom;surface.fire('wheel',{ctrlKey:true,deltaY:-50});assert.equal(state.zoom,lastZoom);
 assert.ok(ended>=3);
-console.log('PASS: touch pinch/resumption/cancel, ctrl-wheel, Safari gesture deduplication, zoom limits/easing, horizon reversal and 1809 safe observer frames.');
+console.log('PASS: touch pinch/resumption/cancel, ctrl-wheel, Safari gesture deduplication, zoom limits/easing, compatibility distance mapping and idle drift ramps.');

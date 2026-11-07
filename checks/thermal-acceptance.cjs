@@ -1,20 +1,18 @@
-// Reproducible, local-only image/domain/performance acceptance on actual WebGL.
-// A synchronous one-pixel readback times completed work with a CPU clock; it
-// includes the browser command-buffer round trip and is not a GPU timer query.
+// Local image/domain acceptance. Fixed-budget timing lives in thermal-performance.cjs.
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const engine=process.env.SIMULATION_BROWSER||'webkit';
+assert.ok(['firefox','webkit'].includes(engine),'Use headless Firefox or WebKit');
 const base=process.argv[2]||'http://127.0.0.1:8765';
-const baseline=process.argv[3]||'http://127.0.0.1:8766';
 // Preserve earlier acceptance evidence when validating a new local change.
 const output=process.env.THERMAL_OUTPUT?path.resolve(process.env.THERMAL_OUTPUT):path.join(__dirname,'../verification/thermal');fs.mkdirSync(output,{recursive:true});
-const executable=process.env.CHROME_EXECUTABLE||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const percentile=(items,f)=>[...items].sort((a,b)=>a-b)[Math.min(items.length-1,Math.floor(items.length*f))];
 
 (async()=>{
- const browser=await chromium.launch({executablePath:executable,headless:true,args:['--use-angle=metal','--ignore-gpu-blocklist']});
- const report={created:new Date().toISOString(),matrix:[],boundaries:[],convergence:[],performance:{},errors:[]};
+ const browser=await playwright[engine].launch({headless:true});
+ const report={created:new Date().toISOString(),matrix:[],boundaries:[],convergence:[],errors:[]};
  try{
   const page=await browser.newPage({viewport:{width:800,height:650}});
   page.on('pageerror',e=>report.errors.push(e.message));
@@ -97,39 +95,7 @@ const percentile=(items,f)=>[...items].sort((a,b)=>a-b)[Math.min(items.length-1,
     report.convergenceChecks.push({tilt,options,result,error:compare(reference,sampled)});
    }
   }
-  // Completed trace and composite separately, including common JS submission
-  // costs in end-to-end. Equal sample counts and tolerances are recorded below.
-  const benchmark=async(url,domain)=>{
-   const bench=await browser.newPage({viewport:{width:800,height:650}});await bench.goto(url+'/checks/physical-browser.html');await bench.waitForFunction(()=>window.result);
-   const values=await bench.evaluate(async domain=>{
-    // Renderer verification permits the legacy 26rg domain as a performance oracle.
-    await runPhysicalCase({scene:'quasar',tilt:18,density:16000,observer:'static',verification:{outerRadius:domain||undefined,observerDistance:domain===26?80:undefined,skyRadius:domain===26?150:undefined,disableTimers:true}});
-    const gl=document.getElementById('cosmos').getContext('webgl2'),ext=gl.getExtension('EXT_disjoint_timer_query_webgl2'),original=gl.drawArrays.bind(gl),size={width:640,height:400,scale:400*.028},samples={};let calls=[];
-    const complete=()=>{const fbo=gl.getParameter(gl.FRAMEBUFFER_BINDING);if(fbo){gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.readPixels(0,0,1,1,gl.RGBA,gl.FLOAT,new Float32Array(4));}else gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));};
-    gl.drawArrays=(...args)=>{complete();const query=ext?gl.createQuery():null;if(query)gl.beginQuery(ext.TIME_ELAPSED_EXT,query);const start=performance.now();original(...args);if(query)gl.endQuery(ext.TIME_ELAPSED_EXT);complete();calls.push({query,ms:performance.now()-start,source:'cpu-completed-readback'});};
-    for(const mode of ['drag','spin','static','exposure']){
-     samples[mode]=[];
-     for(let i=0;i<19;i++){
-      caseState.paused=mode!=='drag';caseState.interacting=mode==='drag';
-      if(mode==='drag')caseState.tilt=18+(i%2)*.5;if(mode==='spin')caseState.spin=.65+(i%2)*.01;if(mode==='exposure')caseState.exposure=1+(i%2)*.05;
-      calls=[];complete();const start=performance.now(),builds=currentEngine.metrics.geodesicBuilds;currentEngine.draw(size,0);complete();
-      const endToEndMs=performance.now()-start;
-      for(const call of calls)if(call.query){for(let poll=0;poll<100&&!gl.getQueryParameter(call.query,gl.QUERY_RESULT_AVAILABLE);poll++)await new Promise(r=>setTimeout(r,2));if(!gl.getParameter(ext.GPU_DISJOINT_EXT)&&gl.getQueryParameter(call.query,gl.QUERY_RESULT_AVAILABLE)){call.ms=gl.getQueryParameter(call.query,gl.QUERY_RESULT)/1e6;call.source='gpu-query';}gl.deleteQuery(call.query);}
-      // Unchanged images now skip every draw; zero is the measured GPU work,
-      // while end-to-end still includes the explicit verification round trip.
-      if(i>=4)samples[mode].push({endToEndMs,traceMs:currentEngine.metrics.geodesicBuilds>builds?calls[0].ms:0,compositeMs:calls.at(-1)?.ms??0,timingSource:calls[0]?.source??'no-gpu-submission',raySamples:currentEngine.metrics.raySamples,quality:currentEngine.metrics.traceQuality,builds:currentEngine.metrics.geodesicBuilds-builds});
-      await new Promise(r=>setTimeout(r,10));
-     }
-    }gl.drawArrays=original;return {samples,metrics:{...currentEngine.metrics},source:'Trace/composite: GPU TIME_ELAPSED queries, CPU completed-readback fallback. End-to-end: CPU performance.now + synchronous 1-pixel GPU readback (includes command-buffer roundtrip)'};
-   },domain);await bench.close();return values;
-  };
-  if(!process.env.THERMAL_SKIP_PERFORMANCE){
-  report.performance.baseline=await benchmark(baseline,null);report.performance.optimized=await benchmark(base,26);report.performance.expanded=await benchmark(base,chosen);
-  for(const [name,value] of Object.entries(report.performance))for(const [mode,samples] of Object.entries(value.samples))value[mode]={traceMedian:percentile(samples.map(s=>s.traceMs),.5),traceP95:percentile(samples.map(s=>s.traceMs),.95),compositeMedian:percentile(samples.map(s=>s.compositeMs),.5),endToEndMedian:percentile(samples.map(s=>s.endToEndMs),.5),endToEndP95:percentile(samples.map(s=>s.endToEndMs),.95),raySamples:[...new Set(samples.map(s=>s.raySamples))],qualities:[...new Set(samples.map(s=>s.quality))],timingSources:[...new Set(samples.map(s=>s.timingSource))],traceBuilds:samples.reduce((n,s)=>n+s.builds,0)};
-  for(const name of ['optimized','expanded'])for(const mode of ['drag','spin','static','exposure']){assert.deepEqual(report.performance[name][mode].raySamples,report.performance.baseline[mode].raySamples,'unequal actual ray budget');assert.deepEqual(report.performance[name][mode].qualities,report.performance.baseline[mode].qualities,'unequal integral quality');}
-  report.performance.reduction={};for(const mode of ['drag','spin'])report.performance.reduction[mode]={sameBoundary:1-report.performance.optimized[mode].traceMedian/report.performance.baseline[mode].traceMedian,netExpanded:1-report.performance.expanded[mode].traceMedian/report.performance.baseline[mode].traceMedian};
-  }else report.performance={source:'Final fixed-budget interleaved comparison is recorded in performance-interleaved.json'};
   assert.deepEqual(report.errors,[]);await page.close();
  }finally{fs.writeFileSync(path.join(output,'report.json'),JSON.stringify(report,null,2)+'\n');await browser.close();}
- console.log(JSON.stringify({selectedRadius:report.selectedRadius,domainConverged:report.domainConverged,performance:report.performance.reduction,device:report.device},null,2));
+ console.log(JSON.stringify({selectedRadius:report.selectedRadius,domainConverged:report.domainConverged,device:report.device},null,2));
 })().catch(e=>{console.error(e);process.exitCode=1;});

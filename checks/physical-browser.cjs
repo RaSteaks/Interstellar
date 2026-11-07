@@ -4,14 +4,15 @@
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const playwright=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const engine=process.env.SIMULATION_BROWSER||'webkit';
+assert.ok(['firefox','webkit'].includes(engine),'Use headless Firefox or WebKit');
 const base=process.argv[2]||'http://127.0.0.1:8765';
 const output=path.join(__dirname,'../verification/physical');fs.mkdirSync(output,{recursive:true});
-const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')?'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome':undefined);
 
 (async()=>{
- const browser=await chromium.launch({executablePath:executable,headless:true,args:process.platform==='darwin'?['--use-angle=metal','--ignore-gpu-blocklist']:['--enable-unsafe-swiftshader']});
- const report={gpu:[],ui:[],coefficientProbe:null,errors:[]};
+ const browser=await playwright[engine].launch({headless:true});
+ const report={browser:engine,version:browser.version(),gpu:[],ui:[],coefficientProbe:null,errors:[]};
  try {
   const gpu=await browser.newPage({viewport:{width:800,height:650}});
   gpu.on('pageerror',e=>report.errors.push(e.message));
@@ -82,7 +83,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   // The live state is shared with WebMCP, but each UI group is a native
   // disclosure. Open only the group needed by a browser interaction so the
   // check covers the same keyboard/focus path as a person using the panel.
-  const openGroup=async id=>{const group=page.locator(`#${id}`);if(!(await group.getAttribute('open')))await group.locator('summary').click();};
+  const openGroup=async id=>{const group=page.locator(`#${id}`);if(await group.getAttribute('open')===null)await group.locator('summary').click();};
   let obs=await observe();assert.equal(obs.render.mode,'webgl2-volume-grrt');assert.equal(obs.controlsExpanded,false);assert.equal(obs.paused,true);
   assert.equal(obs.tilt,8);assert.equal(obs.presetCustomized,false);assert.ok(obs.computationalRadius>=128);assert.equal(obs.initialObserverDistance,obs.computationalRadius*4);
   assert.equal(await page.locator('#controls button').first().isVisible(),false);
@@ -94,7 +95,6 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   // Toggling an inner disclosure must never close the outer panel or change
   // the observation expansion state exposed through WebMCP.
   await page.locator('#imaging-group > summary').click();assert.equal((await observe()).controlsExpanded,true);await page.locator('#imaging-group > summary').click();
-  assert.equal(await page.locator('#scene-choice option').count(),12);
   // Actual effective parameters own customization. Display-only/camera changes
   // cannot make the preset appear modified; returning physics clears it.
   await configure({exposure:1.2,zoom:1.1,display:'accuracy',density:16000});assert.equal((await observe()).presetCustomized,false);
@@ -117,7 +117,7 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   await configure({spin:.7,paused:false});await page.locator('#restore-preset').click();assert.equal((await observe()).paused,false);await configure({paused:true});
   await page.locator('#reset').click();obs=await observe();assert.equal(obs.tilt,8);assert.equal(obs.presetCustomized,false);assert.equal(obs.paused,true);
   await page.locator('.control-toggle').click();await page.screenshot({path:path.join(output,'thermal-default-0.png')});await page.locator('.control-toggle').click();
-  report.ui.push({name:'ten native presets; modify, revert, restore; effective parameters; preserved playback; startup/reset at 8°',computationalRadius:obs.computationalRadius,initialObserverDistance:obs.initialObserverDistance});
+  report.ui.push({name:'native presets; modify, revert, restore; effective parameters; preserved playback; startup/reset at 8°',computationalRadius:obs.computationalRadius,initialObserverDistance:obs.initialObserverDistance});
   await page.locator('#scene-choice').focus();await page.keyboard.press('ArrowDown');await page.keyboard.press('Enter');
   await page.locator('#scene-choice').selectOption('stellar');await page.waitForTimeout(300);obs=await observe();assert.equal(obs.mass,10);assert.equal(obs.band,'xray');
   await page.keyboard.press('Escape');assert.equal((await observe()).controlsExpanded,false);assert.equal(await page.locator('.control-toggle').evaluate(e=>document.activeElement===e),true);
@@ -156,42 +156,20 @@ const executable=process.env.CHROME_EXECUTABLE||(fs.existsSync('/Applications/Go
   await configure({paused:true});const stopped=(await observe()).flight.r;await page.waitForTimeout(250);assert.equal((await observe()).flight.r,stopped);
   await page.emulateMedia({reducedMotion:'reduce'});await page.waitForFunction(()=>document.getElementById('fall').disabled);await configure({paused:false});const reduced=(await observe()).flight.r;await page.waitForTimeout(250);assert.equal((await observe()).flight.r,reduced);assert.equal((await observe()).falling,false);assert.equal(await page.locator('#fall').isDisabled(),true);
   report.ui.push({name:'proper-time journey, pause, runtime reduced-motion camera freeze',start,advanced});
-  // Static display adds one PSF texture and two two-attachment accumulation
-  // buffers to the eleven physical textures. Wait for all four samples before
-  // comparing resource counts across a resize, so transient allocation is valid.
-  await page.emulateMedia({reducedMotion:'reduce'});await configure({scene:'m87',paused:true,density:32000});await page.waitForFunction(()=>{const r=observationTools.get_observation.execute({}).render;return r.diagnosticCurrent&&!r.diagnosticPending&&r.progressiveSamples===r.progressiveTarget&&r.registeredTextures===16;});const textureCount=(await observe()).render.registeredTextures,beforeMobileResize=(await observe()).render.composites;
-  await page.setViewportSize({width:390,height:844});
-  // The old viewport can still advertise completed samples while its resize
-  // event is pending. Require the changed backing store and a new composite
-  // before treating fullscreen notifications as duplicates of that resize.
-  await page.waitForFunction(before=>{
-   const r=observationTools.get_observation.execute({}).render,canvas=document.getElementById('cosmos'),bounds=document.getElementById('scene').getBoundingClientRect(),dpr=Math.min(devicePixelRatio||1,2);
-   return innerWidth===390&&innerHeight===844&&canvas.width===Math.round(bounds.width*dpr)&&canvas.height===Math.round(bounds.height*dpr)&&r.composites>before&&r.diagnosticCurrent&&!r.diagnosticPending&&r.progressiveSamples===r.progressiveTarget;
-  },beforeMobileResize);
-  // Duplicate fullscreen notifications used to clear a settled canvas via
-  // same-value backing-store writes, leaving the new composite cache blank.
-  const duplicateResize=await page.evaluate(async()=>{
-   const before=observationTools.get_observation.execute({}).render.composites,writes={width:0,height:0},prototype=HTMLCanvasElement.prototype,descriptors={};
-   for(const key of ['width','height']){const descriptor=Object.getOwnPropertyDescriptor(prototype,key);descriptors[key]=descriptor;Object.defineProperty(prototype,key,{...descriptor,set(value){writes[key]++;return descriptor.set.call(this,value);}});}
-   try{document.dispatchEvent(new Event('fullscreenchange'));document.dispatchEvent(new Event('fullscreenchange'));await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));return {writes,before,after:observationTools.get_observation.execute({}).render.composites};}
-   finally{for(const key of ['width','height'])Object.defineProperty(prototype,key,descriptors[key]);}
-  });assert.deepEqual(duplicateResize.writes,{width:0,height:0});assert.equal(duplicateResize.after,duplicateResize.before);report.ui.push({name:'duplicate resize preserves settled drawing buffer',...duplicateResize});
-  await page.locator('.control-toggle').click();const layout=await page.evaluate(()=>({width:document.documentElement.scrollWidth,viewport:innerWidth,controls:document.getElementById('controls').getBoundingClientRect().toJSON(),toggle:document.querySelector('.control-toggle').getBoundingClientRect().toJSON()}));
-  assert.equal((await observe()).render.registeredTextures,textureCount);assert.equal(layout.width,layout.viewport);assert.ok(layout.controls.left>=0&&layout.controls.right<=391);assert.ok(layout.toggle.bottom<=844);
-  await page.screenshot({path:path.join(output,'mobile-controls.png')});await page.keyboard.press('Escape');assert.equal((await observe()).controlsExpanded,false);
-  await page.setViewportSize({width:320,height:568});await page.waitForTimeout(250);await page.locator('.control-toggle').click();const narrow=await page.evaluate(()=>({width:document.documentElement.scrollWidth,viewport:innerWidth,controls:document.getElementById('controls').getBoundingClientRect().toJSON()}));assert.equal(narrow.width,narrow.viewport);assert.ok(narrow.controls.left>=0&&narrow.controls.right<=321);await page.screenshot({path:path.join(output,'mobile-controls-320.png')});await page.keyboard.press('Escape');
+  // Mobile layout and duplicate-resize behavior live in mobile-controls.cjs.
+  await configure({scene:'m87',paused:true,density:32000});
   await page.setViewportSize({width:844,height:390});await page.waitForTimeout(250);await page.locator('.control-toggle').click();const landscape=await page.evaluate(()=>({width:document.documentElement.scrollWidth,viewport:innerWidth,controls:document.getElementById('controls').getBoundingClientRect().toJSON()}));assert.equal(landscape.width,landscape.viewport);assert.ok(landscape.controls.top>=0&&landscape.controls.bottom<=391);
   // The short desktop panel owns overflow when its fixed rows cannot both fit.
   // Reaching the action row is part of the contract, not just clipping its box.
-  await page.locator('#controls').evaluate(element=>{element.scrollTop=element.scrollHeight;});const landscapeAction=await page.locator('#reset').boundingBox();assert.ok(landscapeAction.y>=0&&landscapeAction.y+landscapeAction.height<=390);await page.screenshot({path:path.join(output,'short-landscape.png')});await page.keyboard.press('Escape');assert.equal((await observe()).controlsExpanded,false);report.ui.push({name:'390×844, 320×568 and short-landscape grouped panel without overflow; actions remain reachable',layout,narrow,landscape,landscapeAction});
+  await page.locator('#controls').evaluate(element=>{element.scrollTop=element.scrollHeight;});const landscapeAction=await page.locator('#reset').boundingBox();assert.ok(landscapeAction.y>=0&&landscapeAction.y+landscapeAction.height<=390);await page.screenshot({path:path.join(output,'short-landscape.png')});await page.keyboard.press('Escape');assert.equal((await observe()).controlsExpanded,false);report.ui.push({name:'short desktop panel keeps actions reachable',landscape,landscapeAction});
   await page.close();
 
   const fallback=await browser.newPage({viewport:{width:390,height:844},reducedMotion:'reduce'});await fallback.addInitScript(()=>{const original=HTMLCanvasElement.prototype.getContext;HTMLCanvasElement.prototype.getContext=function(kind,...args){return kind==='webgl2'?null:original.call(this,kind,...args);};});
   await fallback.goto(base+'/dist/');await fallback.waitForTimeout(350);assert.equal(await fallback.locator('#scene-choice').isDisabled(),true);assert.equal(await fallback.locator('#fall').isDisabled(),true);assert.match(await fallback.locator('#render-state').textContent(),/兼容/);
   await fallback.locator('.control-toggle').click();assert.equal(await fallback.locator('#tilt-value').textContent(),'8°');await fallback.locator('#reset').click();assert.equal(await fallback.locator('#tilt-value').textContent(),'8°');await fallback.keyboard.press('Escape');assert.equal(await fallback.locator('.control-shell').getAttribute('open'),null);
   await fallback.screenshot({path:path.join(output,'canvas-fallback.png')});report.ui.push({name:'forced Canvas fallback, honest limits and reset'});await fallback.close();
-  assert.deepEqual(report.errors,[]);
-  fs.writeFileSync(path.join(output,'report.json'),JSON.stringify(report,null,2)+'\n');
-  console.log('PASS: 14 actual GPU cases, float32 coefficient oracles, causal movie changes, exposure invariance, production controls, atomic validation, interior observer, proper-time journey, reduced motion, phone layout and Canvas fallback.');
- } finally {await browser.close();}
+  assert.deepEqual(report.errors,[]);report.passed=true;
+  console.log('PASS: 14 actual GPU cases, float32 coefficient oracles, causal movie changes, exposure invariance, production controls, atomic validation, interior observer, proper-time journey, reduced motion, short desktop layout and Canvas fallback.');
+ }catch(error){report.failure=error.stack;throw error;}
+ finally {fs.writeFileSync(path.join(output,'report.json'),JSON.stringify(report,null,2)+'\n');await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

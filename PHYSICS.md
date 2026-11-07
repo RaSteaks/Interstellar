@@ -25,7 +25,7 @@ Kerr–Schild 度规为 `g_mu_nu = eta_mu_nu + f l_mu l_nu`，`f=(2r−Q²)r²/(
 
 现代路径采用 Bogacki–Shampine 3(2) 嵌入步进，显式估计位置、动量和坐标时间误差。交互/精细档当前容限为 1.5e-4 / 4e-5，媒体步长同时由盘厚和流体网格约束，精细档再缩至 0.45 倍。CPU 双精度检查采用更严格容限。
 
-回溯外部光线用外向 KS，避免在过去向捕获路径上追逐无限坐标时间；跨越未来外视界的观察者用入向 KS。向外到达 r>2.8 的内部光线可以转换到外向图，位置、切向量、协变动量、两条偏振基底、时间和方位均按同一坐标变换处理。该变换的方位角积分以观察半径锚定：在该半径处两种图只差自旋反射，镜头与四元标架逐位不变；`relativity.js` 的 `changeChart` 传入同一锚定，JS 与 GPU 两套实现因此逐点互逆，`checks/physical-core.cjs` 以往返断言锁定这一等价关系（度规轴对称，四元标架与零性断言无法发现方位偏差）。天空终点转换回物理入向图的方向，不能直接拿协变动量当逃逸方向。
+回溯外部光线用外向 KS，避免在过去向捕获路径上追逐无限坐标时间；跨越未来外视界的观察者用入向 KS。向外到达 r>2.8 的内部光线可以转换到外向图，位置、切向量、协变动量、两条偏振基底、时间和方位均按同一坐标变换处理。该变换的方位角积分以观察半径锚定：在该半径处两种图只差自旋反射，镜头与四元标架逐位不变；`relativity.js` 的 `changeChart` 传入同一锚定，JS 与 GPU 两套实现因此逐点互逆，`checks/physical-core.cjs` 对实际 JS 变换执行位置与向量往返检查（度规轴对称，四元标架与零性断言无法发现方位偏差）；三维浏览器验收另行比较史瓦西屏幕的解析与连接 ODE 传输。天空终点转换回物理入向图的方向，不能直接拿协变动量当逃逸方向。
 
 外部回溯捕获的终止窗为 r_+×1.0005。内部观察者的过去光锥继续穿越未来外视界；负 Killing 能量不能连接静止外部光源，正能量但被径向势禁阻区隔离的路径有独立非逃逸判定。这些是几何判定，不是全屏黑色遮罩。积分预算耗尽保持 `unfinished`，与捕获分开；无效浮点另记 `invalid`。
 
@@ -111,6 +111,8 @@ Stokes 向量为(I,Q,U,V)，吸收与法拉第作用构成完整4×4矩阵。偏
 
 ## 数值预算、验证和使用
 
+当前测试分组与执行条件见 [`checks/README.md`](checks/README.md)，日常入口为 `node checks/run.cjs`。
+
 现代成像每条采样光线沿有限体积积累发光，不再受两个盘面交点限制。热盘纯强度使用独立标量核 `I += T S (1-exp(-dτ)); T *= exp(-dτ)`，不构建偏振屏幕基底或Stokes矩阵；偏振与GRMHD保留完整路径。远场取消5r_g固定上限，由嵌入积分误差、介质入口和薄层尺度共同限制，盘附近继续细分。缓存模型、通量/盘面/光谱表、世界线和观察者；曝光仅合成缓存。
 
 BS3(2) 使用 FSAL 性质复用接受终点的度规和导数，每个接受的标量步由5次度规求值降至3次；局部误差公式保持相同，拒绝试探及坐标图切换时重新初始化。初始空旷远场步长按距离介质的空域长度选取，再由同一误差与介质限制检验。普通稳态热盘不逐格转换无用的发光时刻；轴对称速度直接在同一点的规则入向标架归一化后施加径向/时间 Jacobian，精确消去两次方位旋转。热点保留相位和光路时间，GRMHD保留原数据坐标路径。独立1386事件对照的四速度与p·u误差约10⁻¹²–10⁻¹¹，证据见 `verification/thermal/axisymmetric-emitter-proof.json`。
@@ -134,10 +136,10 @@ BS3(2) 使用 FSAL 性质复用接受终点的度规和导数，每个接受的�
 检查入口：
 
 - `node checks/physical-core.cjs`：带电/正负自旋ISCO、96族类时相机与注入、两坐标图零范数/标架、哈密顿梯度、捕获边界、守恒量、固有时间落体、混合EOS质量通量/高斯柱、光谱、解析Stokes/独立RK4对照、GRMHD哈希与因果速度。
-- `node checks/plunge-orbit.cjs`：倾斜捕获的能量和完整角动量向量守恒、类时/零标架、采样世界线的四速度与哈密顿加速度、固有时间步进、近临界绕行及跨视界连续性。`checks/plunge-orbit-browser.cjs`使用headless Firefox/WebKit验证7个GPU观察事件、既有场景和真实页面控制，产物保存在`verification/plunge-orbit/`。
-- `checks/physical-browser.html` + `checks/physical-browser.cjs`：实际GPU多场景、内外视界、谱系数CPU/GPU对照、偏振光锥、真实时间变化、曝光不改物理缓存、控件、手机、减少动态效果和兼容回退。
+- `node checks/physical-core.cjs`（绕行世界线部分）：倾斜捕获的能量和完整角动量向量守恒、类时/零标架、采样世界线的四速度与哈密顿加速度、固有时间步进、近临界绕行及跨视界连续性。`checks/plunge-orbit-browser.cjs`使用headless Firefox/WebKit验证7个GPU观察事件、既有场景和真实页面控制，产物保存在`verification/plunge-orbit/`。
+- `checks/physical-browser.html` + `checks/physical-browser.cjs`：实际GPU多场景、内外视界、谱系数CPU/GPU对照、偏振光锥、真实时间变化、曝光不改物理缓存、桌面控件、减少动态效果和兼容回退；手机布局及重复尺寸通知由 `checks/mobile-controls.cjs` 负责。
 - `checks/render-performance-browser.html` + `checks/render-performance.cjs`：实际GL提交/纹理分配、静止零绘制、曝光只合成、四次渐进采样及相机/尺寸/时间失效、独立jitter光线的线性radiance/Stokes均值、历史诊断来源与最新完整计数、真实GPU预算来源及disjoint回退/恢复、缺少浮点线性过滤扩展时的着色器和展示。报告与截图在 `verification/render-performance/`；不通过降低分辨率宣称单次追踪加速。
-- `checks/thermal-acceptance.cjs`：固定四个自旋及0°/18°/78°/负仰角，逐级边界、背景透射、标量/完整传输、步长/误差/采样对照；与临时基线服务器比较同设备追踪/合成/端到端完成耗时。报告和截图位于 `verification/thermal/`，不进入发布目录。
+- `checks/thermal-acceptance.cjs`：固定四个自旋及0°/18°/78°/负仰角，逐级边界、背景透射、标量/完整传输、步长/误差/采样对照；不重复性能测量，版本耗时对比由 `thermal-performance.cjs` 负责。报告和截图位于 `verification/thermal/`，不进入发布目录。
 - `checks/thermal-performance.cjs`：最终性能依据；固定生产预算128000/256000，12次预热、31次测量，轮换旧版、同域优化和扩域版的执行顺序。固定实际光线数及积分档位，通过断言拒绝采样预算不同的比较。基线只在检查中停用自动预算调整；原始副本和哈希保存在 `verification/thermal/baseline/`。
 - 原四份Node检查仍用于历史核心与实际交互回归；`idle-drift.cjs`加载当前物理相机，只替换DOM/GPU。
 

@@ -32,6 +32,33 @@ const output=path.join(__dirname,'../verification/grmhd3d/browser',engine);fs.mk
    let norm=0,difference=0;for(let i=0;i<first.radiance.length;i++)if(i%4!==3){norm+=Math.abs(first.radiance[i]);difference+=Math.abs(first.radiance[i]-later.radiance[i]);}
    return {norm,difference,relative:difference/norm};
   });assert.ok(evolution.norm>0&&evolution.relative>.001);report.evolution=evolution;
+  // Full acceptance includes the independent connection-ODE screen oracle.
+  report.screen=[];
+  for(const radius of smoke?[]:[15,3,1.5]){
+   const result=await gpu.evaluate(async radius=>{
+    const options={scene:'grmhd3d',observer:'infall',look:'center',flightRadius:radius,flightLens:40,density:1024};
+    const analytic=await runPhysicalCase({...options,verification:{progressiveSamples:1,rayBudget:1024}});
+    const first=currentEngine.readback();
+    const numerical=await runPhysicalCase({...options,verification:{progressiveSamples:1,rayBudget:1024,forceTransportODE:true}});
+    const second=currentEngine.readback();
+    const compare=name=>{
+     let norm=0,difference=0,maximum=0;
+     for(let i=0;i<first[name].length;i++){
+      if(name==='radiance'&&i%4===3)continue;
+      norm+=Math.abs(first[name][i]);const delta=Math.abs(first[name][i]-second[name][i]);difference+=delta;maximum=Math.max(maximum,delta);
+     }
+     return {norm,difference,relative:difference/Math.max(norm,1e-30),maximum};
+    };
+    return {radius,analytic:{mode:analytic.screenTransport,invalid:analytic.invalidRays,unfinished:analytic.unfinishedRays,light:analytic.light,dataStatus:analytic.dataStatus},numerical:{mode:numerical.screenTransport,invalid:numerical.invalidRays,unfinished:numerical.unfinishedRays,light:numerical.light,dataStatus:numerical.dataStatus},radiance:compare('radiance'),stokes:compare('stokes')};
+   },radius);
+   report.screen.push(result);
+   assert.equal(result.analytic.mode,'schwarzschild-plane');assert.equal(result.numerical.mode,'connection-ode');
+   for(const mode of [result.analytic,result.numerical]){assert.equal(mode.invalid,0);assert.equal(mode.unfinished,0);}
+   assert.ok(result.radiance.norm>0&&result.stokes.norm>0);
+   // The ODE has finite transport and geodesic tolerances; this compares the
+   // physical screen/Stokes result, including the emitter's gauge projection.
+   assert.ok(result.radiance.relative<1e-4,JSON.stringify(result));assert.ok(result.stokes.relative<1e-4,JSON.stringify(result));
+  }
   const old=await gpu.evaluate(()=>runPhysicalCase({scene:'m87',observer:'static',density:4096}));assert.equal(old.dataStatus,'ready');assert.equal(old.finite,true);assert.equal(old.invalidRays,0);assert.equal(old.unfinishedRays,0);report.legacy=old;await gpu.close();
   if(smoke){report.passed=true;console.log('PASS: native 3D smoke, actual time evolution and legacy 2D loading.');return;}
 

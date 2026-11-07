@@ -157,7 +157,7 @@ curl -sS -L -D - -o /dev/null https://interstellar.rasteaks.chatgpt.site/preview
 
 ### 本地验证与发布流程
 
-没有新增构建步骤或项目依赖；发布产物仍是已经可用的 `dist/`。部署继续使用现有 Sites 的版本保存与发布流程（仓库未定义 CLI 部署命令），无需改为 Worker 项目。本地验证使用宿主机工具，禁止启动历史检查脚本中的 Chrome runner：
+没有新增构建步骤或项目依赖；发布产物仍是已经可用的 `dist/`。部署继续使用现有 Sites 的版本保存与发布流程（仓库未定义 CLI 部署命令），无需改为 Worker 项目。本地验证使用宿主机已有的 Playwright 与 headless WebKit／Firefox：
 
 ```bash
 # 从仓库根目录启动 Cloudflare 本地静态资产服务；不执行部署。
@@ -194,50 +194,28 @@ PLAYWRIGHT_MODULE=/path/to/playwright node checks/preview.cjs http://127.0.0.1:1
 
 ## ✅ 检查与验证
 
-科学核心与交互逻辑用无依赖的 Node 检查（不需要浏览器）：
+日常检查统一为一个入口，只需 Node 和 Python 3：
 
 ```bash
-node checks/physical-core.cjs      # ISCO、96 组类时观察者与注入、双图零标架、哈密顿梯度、捕获边界、守恒逃逸、固有时间落体、质量守恒、光谱、Stokes 传输、GRMHD 记录完整性
-node checks/render-physics.cjs     # 历史渲染核心：盘面分布、观察者标架、零测地线、着色器结构 lint
-node checks/navigation.cjs         # 手势、去重、缩放边界、缓动、近视界标架
-node checks/idle-drift.cjs         # 空闲绕转、指针／原生手势生命周期、预设与参数原子拒绝、旅程恢复
-node checks/plunge-particles.cjs   # 坠落类时归一化、E/L 守恒、近视界频移、轨迹单调性
-node checks/plunge-orbit.cjs       # 倾斜绕行捕获、完整角动量向量守恒、世界线/四速度/哈密顿加速度一致、跨视界连续性
-node checks/continuous-solver.cjs  # t=800 恢复、native/Wasm 对照、t=1600 有限新状态
-node checks/grmhd-worker.cjs       # 逐帧目标、固定 20 GM/c³ 快照间隔、背压、环形缓存和重置
+node checks/run.cjs                  # 科学核心、兼容物理、导航、应用状态、VTK I/O
+node checks/run.cjs data             # 三维发布数据完整性与演化
+node checks/run.cjs solver           # 连续求解与 Worker；需要 rustc
 ```
 
-绕行坠落的真实 GPU 与页面检查使用隔离的 headless WebKit（可用 `SIMULATION_BROWSER=firefox` 切换）。先从仓库根目录启动本地静态服务，再运行：
+默认组不启动浏览器、不编译原生求解器，日志与报告保存在 `verification/checks/`。也可直接运行单个脚本，或组合运行 `node checks/run.cjs core data solver`。
+
+浏览器检查按改动范围选择，统一使用隔离的 headless WebKit 或 Firefox，不启动 Chrome：
 
 ```bash
 python3 -m http.server 18786 --bind 127.0.0.1
-# 另一个终端中，PLAYWRIGHT_MODULE 指向本机已安装的 Playwright 包。
-PLAYWRIGHT_MODULE=/path/to/playwright node checks/plunge-orbit-browser.cjs http://127.0.0.1:18786
+# 在另一个终端运行；PLAYWRIGHT_MODULE 指向宿主机已有的 Playwright 包。
+PLAYWRIGHT_MODULE=/path/to/playwright node checks/physical-browser.cjs http://127.0.0.1:18786
+# 设置 SIMULATION_BROWSER=firefox 可切换引擎；默认 webkit。
 ```
 
-该检查覆盖 7 个内外观察事件、4 个交互档事件、两个既有场景、真实 GPU 光线状态、发光扰动环平均通量、固定观察者下盘面实际演化、标量/完整传输一致性、旅程控制、终点重播、参数原子拒绝、原生选择与键盘、390px 布局、减少动态效果和无视频请求。截图、控制台、请求日志、报告与 Playwright trace 保存在 `verification/plunge-orbit/`。新检查不启动 Chrome，也不访问个人浏览器配置。
+[检查目录说明](checks/README.md) 列出全部现存入口、覆盖范围、依赖与按改动选择的规则。移动控件、缓存调度、绕行、三维渲染和嵌入预览各有明确职责；热盘收敛、固定预算性能对比及原生求解器检查属于专项验收，不要求每次普通修复全量执行。三维屏幕对照已归并到三维浏览器套件；两份旧粒子 GPU 检查页和重复的性能测量已删除。
 
-下述是旧版 Chrome 检查的历史复现说明；它们尚未迁移到 Firefox/WebKit，当前浏览器测试约束下不要执行这些 runner。历史真实 GPU 检查需要两项本机资源，都不写入项目依赖：
-
-1. **Playwright 与本机 Chrome**：用环境变量 `PLAYWRIGHT_MODULE` 指向宿主机上已安装的 playwright 包目录，`CHROME_EXECUTABLE` 指向本机 Chrome 可执行文件。
-2. **本地静态服务**：端口 8765 服务仓库根目录（用户页面为 `/dist/`，检查页面为 `/checks/`）。固定预算对照另需端口 8766 服务 `verification/thermal/baseline/`，即此前运行保存的原始快照（该目录已被 `.gitignore` 忽略）；独立回归检查不需要基线服务。
-
-```bash
-export PLAYWRIGHT_MODULE=~/node_modules/playwright   # 宿主机上已安装的包目录，含 package.json
-node checks/physical-browser.cjs http://127.0.0.1:8765
-node checks/render-performance.cjs http://127.0.0.1:8765
-node checks/mobile-controls.cjs http://127.0.0.1:8765
-THERMAL_SKIP_PERFORMANCE=1 node checks/thermal-acceptance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
-node checks/thermal-performance.cjs http://127.0.0.1:8765 http://127.0.0.1:8766
-```
-
-> **判定口径：** 所有场景的未收敛光线与无效光线必须为 0；GPU 浮点系数与双精度 CPU 对照的相对差 <0.1%；偏振误差 <1e-5，且 GRMHD 场景的偏振度 >0.01；逐变体断言实际光线数与积分档位一致（转换矩阵的 Stokes 光锥约束在 `physical-core.cjs` 中独立验证）。完整数值、截图与复现记录写入被忽略的 `verification/`。
-
-`render-performance.cjs` 运行真实 WebGL 提交检查，覆盖静止零绘制、曝光缓存、有限渐进采样、独立子像素积分的 radiance/Stokes 均值、运动/时间/尺寸失效、历史诊断来源与最新完整计数、GPU计时失效回退/恢复，以及缺少浮点线性过滤扩展时的真实着色器。报告位于 `verification/render-performance/`。科学数值检查仍固定单条像素中心光线；四次静止采样是展示抗锯齿，不代表单次光线积分加速。
-
-`mobile-controls.cjs` 检查320/390/430px触控视口中的关闭按钮与读数分离、原生下拉与触控尺寸、滚动和短窗口操作可达性、关闭重开后的参数保留、减少动态效果、尺寸通知与全屏能力回退。求解详情位于“模型与参考”分组，手机底部只保留操作、当前状态和反馈；不支持原生全屏时隐藏该按钮。报告与截图位于 `verification/mobile-controls/`。浏览器触控模拟不替代真实iPhone Safari设备复核。
-
-2026-10-07的同设备、同2048 r_g域固定预算对照中，曝光合成GPU中位耗时从0.7675ms降到0.126541ms（约83.5%），重复静止帧停止GPU提交；单次追踪耗时没有明确加速结论。完整方法与分项在本地复现产物 `verification/render-performance/fixed-budget/performance-interleaved.json`，与下方历史热盘性能报告分别保存。
+测试优先复用所属模块的现有套件，不因每个修复新增独立文件，也不为已覆盖的行为重复补测。保留数值独立参照、关键边界及真实页面验证，移除只约束源码写法和固定数量的断言。截图、日志与报告仍保存在被忽略的 `verification/` 下；设备性能结果及科学限制不因测试精简而改变。
 
 <a id="grmhd"></a>
 
@@ -257,7 +235,7 @@ python3 tools/generate-grmhd3d.py --threads 8 --run-directory verification/grmhd
 
 页面选择“全局三维 GRMHD · 史瓦西”。网格、快照数、当前观察时刻、末时刻及原生约束均来自真实清单；达到末时刻暂停，“重置三维场景”返回该场景起点。继续原生计算并重新打包后，页面重新加载数据；只对实际存在的相邻快照插值，不循环、不预测尚未计算的未来。这里的全局三维模型仍有极区裁切、粗网格、有限历史、数值大气层和无辐射反馈等限制，不能宣称湍流统计已收敛。
 
-检查入口：`python3 checks/grmhd3d-io.py`、`python3 checks/grmhd3d-frames.py`、`node checks/grmhd3d-data.cjs`，以及 headless Firefox/WebKit 的 `checks/grmhd3d-sampling.cjs` 和 `checks/grmhd3d-browser.cjs`。证据保留在 `verification/grmhd3d/`。
+检查入口：`python3 checks/grmhd3d-io.py`、`node checks/grmhd3d-data.cjs`，以及 headless Firefox/WebKit 的 `checks/grmhd3d-sampling.cjs` 和 `checks/grmhd3d-browser.cjs`。原生法向场检查 `grmhd3d-frames.py` 另需 `--source` 和 `--input`，命令见生成器文档。证据保留在 `verification/grmhd3d/`。
 
 `dist/data/grmhd-torus.*` 是本地生成的轴对称片段，不是外部下载的观测数据：
 

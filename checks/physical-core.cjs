@@ -52,43 +52,17 @@ for(const [a,q] of [[-.9,0],[.998,0],[.6,.5]]){
  near(L,L0,2e-6);near(result.ray.p[3],start.p[3],0.0000000001);
 }
 
-// The JS chart change and the shader's point conversion must be exact inverses at
-// every radius. The shader anchors its azimuthal chart integral at the observer
-// radius, so changeChart must be called with that same anchor. The metric is
-// axisymmetric, so no tetrad-orthonormality or null-ray assertion can see a
-// mismatch, and at the observer's own radius the anchor is a bit-exact no-op, so
-// an omitted anchor is invisible at runtime and also needs the structural lint below.
-const chartIntegral=(r,a,q)=>{const gap=2*Math.sqrt(1-a*a-q*q),rp=1+gap/2,rm=1-gap/2,l=Math.log(Math.abs((r-rp)/(r-rm)));return [a/gap*l,Math.log(Math.abs((r-rp)*(r-rm)))+(2-q*q)/gap*l];};
-// Port of the shader's physicalPoint for rayChart=-1 (dist/physical-renderer.js).
-const shaderPhysicalPoint=(x,a,q,distance)=>{const r=R.geometry(x,a,q,-1).r;
- const phi=Math.atan2(x[1],x[0])+Math.atan(a/r)+2*(chartIntegral(r,a,q)[0]-chartIntegral(distance,a,q)[0]);
- const ct=x[2]/r,st=Math.hypot(x[0],x[1])/Math.sqrt(r*r+a*a);
- return [(r*Math.cos(phi)-a*Math.sin(phi))*st,(r*Math.sin(phi)+a*Math.cos(phi))*st,x[2]];};
-let anchorEffect=0;
+// Chart transforms must round-trip actual positions and vectors away from the
+// observer anchor. GPU screen agreement is covered in grmhd3d-browser.cjs.
 for(const [a,q] of [[-.9,0],[0,0],[.65,0],[.9375,0],[.6,.5]])for(const distance of [80,2048]){
- const theta=70*Math.PI/180,st=Math.sin(theta),ct=Math.cos(theta);
- for(const fraction of [.02,.06,.15,.4,.85,1]){
-  const r=fraction*distance,ingoing=[r*st*Math.cos(.7),r*st*Math.sin(.7),r*ct];
-  const outgoing=R.changeChart(ingoing,[0,0,0,1],a,q,1,-1,distance).position;
-  const back=shaderPhysicalPoint(outgoing,a,q,distance);
-  for(let j=0;j<3;j++)near(back[j],ingoing[j],1e-8*Math.max(1,r));
-  if(fraction<1){const bare=R.changeChart(ingoing,[0,0,0,1],a,q,1,-1).position;
-   anchorEffect=Math.max(anchorEffect,Math.abs(Math.atan2(bare[1],bare[0])-Math.atan2(outgoing[1],outgoing[0])));}
+ for(const fraction of [.06,.4,1]){
+  const r=fraction*distance,position=[r*.7,r*.4,r*.5],vector=[.2,-.3,.4,1];
+  const outgoing=R.changeChart(position,vector,a,q,1,-1,distance);
+  const back=R.changeChart(outgoing.position,outgoing.vector,a,q,-1,1,distance);
+  position.forEach((value,i)=>near(back.position[i],value,1e-8*Math.max(1,r)));
+  vector.forEach((value,i)=>near(back.vector[i],value,1e-8));
  }
 }
-// The anchor is not optional: away from the observer radius it rotates the chart by
-// the azimuthal integral, and a caller that omits it no longer inverts the shader.
-assert.ok(anchorEffect>1e-3,`chart anchor had no measurable effect (${anchorEffect})`);
-// Structural lint for the call site: observer's outgoing-chart branch must pass the
-// anchor to both changeChart calls. No image- or metric-level oracle can see this.
-const outgoingBranch=fs.readFileSync(path.join(__dirname,'../dist/relativity.js'),'utf8').match(/if\(chart===-1\)\{[^\n]*/)[0];
-assert.equal((outgoingBranch.match(/changeChart\([^)]*?,1,-1,r\)/g)||[]).length,2);
-// At the observer's own radius the anchor is a no-op, so applying it cannot change
-// any rendered frame; only the agreement at other radii changes.
-const ownRadius=R.observer(.9375,0,18,80,'infall',0,1).position;
-const anchored=R.changeChart(ownRadius,[0,0,0,1],.9375,0,1,-1,80).position;
-const bare=R.changeChart(ownRadius,[0,0,0,1],.9375,0,1,-1).position;
-for(let j=0;j<3;j++)assert.equal(anchored[j],bare[j]);
 
 // A proper-time Schwarzschild infall has an independent closed radius law.
 const schwarz=A.model({scene:'isolated',model:'schwarzschild',spin:0,charge:0});
@@ -186,4 +160,93 @@ assert.ok(metadata.maxDivB<2e-12&&metadata.maxVelocityNormError<1e-10&&metadata.
 assert.equal(metadata.thetaSlope,.7);
 const records=new Float32Array(buffer.buffer,buffer.byteOffset,buffer.byteLength/4),vel=P.velocityTexture(records,metadata);
 for(let i=0;i<vel.length;i+=4){assert.ok(vel[i]**2+vel[i+1]**2+vel[i+2]**2<1);assert.ok(vel[i+3]>=1-1e-6);}
-console.log('PASS: signed/charged ISCO, 96 timelike observer and injection families, null tetrads in both charts, Hamiltonian gradients, capture boundary, conserved escape, proper-time infall, mixed-pressure mass conservation, physical spectra, analytic/full Stokes transfer and verified causal GRMHD records.');
+// Orbital capture worldline; exercise production functions with independent physical oracles.
+{
+ const model=A.model({scene:'plunge'});
+ const pose=(radius,tilt=18,yaw=.7,look='flight')=>A.camera({observer:'infall',zoom:1,tilt,yaw,look,flightRadius:radius},model);
+ assert.equal(model.initialObserverDistance,80);assert.equal(model.outer,25);
+ assert.ok(model.skyRadius>model.outer);assert.equal(model.spin,0);assert.equal(model.charge,0);
+
+ // Constants and null tetrads are measured from the metric, independently of
+ // the radial effective-potential formula used by the new worldline.
+ for(const tilt of [-60,0,18,78])for(const radius of [80,10,4.1,4,3.9,2.80001,2.79999,2.00001,2,1.99999,.7]){
+  const camera=pose(radius,tilt),momentum=R.lower(camera.u,camera.g),x=camera.position;
+  near(R.metricDot(camera.u,camera.u,camera.g),-1);near(-momentum[3],1);
+  const angular=[x[1]*momentum[2]-x[2]*momentum[1],x[2]*momentum[0]-x[0]*momentum[2],x[0]*momentum[1]-x[1]*momentum[0]];
+  near(Math.hypot(...angular),model.orbit.angularMomentum);
+  const initial=pose(80,tilt),p0=R.lower(initial.u,initial.g),x0=initial.position;
+  const axis=[x0[1]*p0[2]-x0[2]*p0[1],x0[2]*p0[0]-x0[0]*p0[2],x0[0]*p0[1]-x0[1]*p0[0]];
+  angular.forEach((value,i)=>near(value,axis[i]));near(R.dot(x,axis),0,1e-7);
+  camera.basis.forEach((v,i)=>{
+   near(R.metricDot(v,camera.u,camera.g),0);
+   camera.basis.forEach((w,j)=>near(R.metricDot(v,w,camera.g),Number(i===j)));
+  });
+  for(const [alpha,beta] of [[0,0],[3,-2],[-6,1]]){
+   const ray=R.initialRay(camera,alpha,beta);near(R.dot(ray.p,R.raise(ray.p,camera.g)),0,1e-7);
+  }
+  assert.ok(camera.u.every(Number.isFinite)&&camera.position.every(Number.isFinite));
+ }
+
+ // Differentiate actual sampled events and compare with their four-velocity.
+ // This detects fake yaw animation, a fixed-latitude orbit, inconsistent clocks,
+ // and phase errors near the unstable circular orbit and either chart boundary.
+ for(const radius of [20,6,4.03,4,3.97,2.8,2.0001,2,1.9999,1]){
+  const h=radius*1e-5,camera=pose(radius),before=pose(radius+h),after=pose(radius-h),ur=A.radialRate(radius,model,18);
+  const ingoing=camera.chart===1?camera.u:R.changeChart(camera.position,camera.u,0,0,-1,1,radius).vector;
+  for(let i=0;i<3;i++)near((before.position[i]-after.position[i])/(2*h)*ur,ingoing[i],2e-6);
+  near((before.properTime-after.properTime)/(2*h)*ur,1,2e-6);
+  near((before.coordinateTime-after.coordinateTime)/(2*h)*ur,ingoing[3],3e-6);
+  // Hamilton's equations give an independent local acceleration oracle.
+  const canonical=sample=>{
+   const u=sample.chart===1?sample.u:R.changeChart(sample.position,sample.u,0,0,-1,1,sample.r).vector;
+   return R.lower(u,R.geometry(sample.position));
+  };
+  const p=canonical(camera),dp=R.derivative({x:camera.position,p,time:0}).p,left=canonical(before),right=canonical(after);
+  for(let i=0;i<4;i++)near((left[i]-right[i])/(2*h)*ur,dp[i],3e-6);
+ }
+ for(const radius of [80,10,4.1,4,3.9,2.05]){
+  const next=A.advanceFall(radius,model,18,.01);
+  assert.ok(next<radius);near(pose(next).properTime-pose(radius).properTime,.01,1e-7);
+ }
+ const horizon=pose(2),end=pose(A.minimumRadius(model,'infall'));
+ assert.ok(horizon.orbit/(2*Math.PI)>1.7&&horizon.orbit/(2*Math.PI)<1.9);
+ assert.ok(end.orbit>horizon.orbit&&end.properTime>horizon.properTime);
+ assert.equal(end.stage,'inside');assert.equal(end.fade,0);
+ // The time and spatial velocity remain continuous at the future horizon.
+ const outside=pose(2+1e-7),inside=pose(2-1e-7);
+ outside.u.forEach((value,i)=>near(value,inside.u[i],2e-6));
+ near(outside.coordinateTime,inside.coordinateTime,2e-6);
+ // Viewing attitude rotates only the spatial tetrad, including inside the
+ // horizon. Looking back must not alter the event, worldline or aberration.
+ for(const radius of [80,4,2,1]){
+  const center=pose(radius,18,.7,'center'),outward=pose(radius,18,.7,'outward');
+  assert.deepEqual(center.position,outward.position);assert.deepEqual(center.u,outward.u);assert.equal(center.orbit,outward.orbit);
+  near(R.metricDot(center.basis[2],outward.basis[2],center.g),-1);
+  for(const look of ['flight','center','outward']){
+   const camera=pose(radius,18,.7,look),ray=R.initialRay(camera,3,-2);
+   near(R.dot(ray.p,R.raise(ray.p,camera.g)),0,1e-7);
+  }
+ }
+}
+// Schwarzschild polarization screen; exercise production functions with independent physical oracles.
+{
+ for(const radius of [40,10,3,2.0001,2,1.5,.7])for(const tilt of [-17,45])for(const impact of [[3,2],[-5,1],[1,-8]]){
+  const camera=R.observer(0,0,tilt,radius,'infall',.3),ray=R.initialRay(camera,...impact),g=camera.g,k=R.raise(ray.p,g),basis=R.schwarzschildScreen(ray.x,ray.p),h=1e-6;
+  assert.ok(basis);basis.forEach((v,i)=>{near(R.metricDot(v,k,g),0);basis.forEach((w,j)=>near(R.metricDot(v,w,g),Number(i===j)));});
+  const low=R.schwarzschildScreen(R.advance(ray,0,0,-h).ray.x,R.advance(ray,0,0,-h).ray.p),high=R.schwarzschildScreen(R.advance(ray,0,0,h).ray.x,R.advance(ray,0,0,h).ray.p);
+  basis.forEach((v,i)=>{
+   const derivative=high[i].map((value,j)=>(value-low[i][j])/(2*h)),ode=R.connectionTransport(ray.x,ray.p,v),residual=derivative.map((value,j)=>value-ode[j]);
+   // Parallel modulo k is enough: the emitter's screen projection removes
+   // that null gauge, while all physical screen components must vanish.
+   for(const axis of [...basis,k])near(R.metricDot(residual,axis,g)/(1+Math.hypot(...k)),0,2e-7);
+  });
+  if(radius>2.8){
+   const outgoing=R.changeChart(ray.x,k,0,0,1,-1,radius),p=R.lower(outgoing.vector,R.geometry(outgoing.position,0,0,-1)),other=R.schwarzschildScreen(outgoing.position,p,-1);
+   for(let i=0;i<2;i++){
+    const converted=R.changeChart(ray.x,basis[i],0,0,1,-1,radius).vector;near(R.metricDot(converted,other[i],R.geometry(outgoing.position,0,0,-1)),1);
+   }
+  }
+ }
+ assert.equal(R.schwarzschildScreen([3,0,0],[1,0,0,1]),null);
+}
+console.log('PASS: signed/charged ISCO, 96 timelike observer and injection families, null tetrads in both charts, Hamiltonian gradients, capture boundary, conserved escape, proper-time infall, mixed-pressure mass conservation, physical spectra, analytic/full Stokes transfer, verified causal GRMHD records, orbital capture worldlines and Schwarzschild screen transport.');

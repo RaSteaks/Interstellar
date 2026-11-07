@@ -168,4 +168,4 @@ GPU层数或资源不足明确报错并允许选择其它场景，不用二维�
 - `app.js` 只监听外层 `#control-shell` 的 toggle；内层折叠不会切换 `controls-open` 或改变共享观察状态。画布让位读取面板实际尺寸，桌面按宽度、手机按高度计算。
 - `#mass-value`、`#accretion-value`、`#isco-value` 等读数使用中性等宽浅灰；`#98aab8` 仅用于按下/选中、滑块进度和可见焦点。所有原控件 ID、原子参数校验、GRMHD 锁定、预设恢复、WebMCP 字段保持不变。
 
-验证重点：Node 语法、导航/空闲绕转、物理核心和渲染路径检查通过；本地浏览器已检查默认收起、四组独立展开、滚动、底部操作栏、手机底部面板和 Esc 焦点恢复。完整桌面/390px/320px/短横屏截图由 `checks/physical-browser.cjs` 输出到被忽略的 `verification/physical/`，不进入发布产物。
+验证重点：Node 语法、导航/空闲绕转、物理核心和渲染路径检查通过；本地浏览器已检查默认收起、四组独立展开、滚动、底部操作栏、手机底部面板和 Esc 焦点恢复。桌面与短横屏截图由 `checks/physical-browser.cjs` 输出到 `verification/physical/`；手机代表性布局由 `checks/mobile-controls.cjs` 输出到 `verification/mobile-controls/`。两目录均被忽略，不进入发布产物。
