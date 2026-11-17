@@ -30,6 +30,50 @@ window.runPhysicalCase=async function(options={}){
  let polarizationMaximum=0;for(let i=0;i<image.stokes.length;i+=4)if(image.stokes[i]>.001)polarizationMaximum=Math.max(polarizationMaximum,Math.hypot(image.stokes[i+1],image.stokes[i+2],image.stokes[i+3])/image.stokes[i]);
  window.result={scene,...engine.metrics,unfinishedRays,invalidRays,light,maximum,polarizationError,polarizationMaximum,finite,captured,escaped,opaque,unfinishedRadiusMin,unfinishedRadiusMax,negativeEnergyUnfinished};document.getElementById("report").textContent=JSON.stringify(window.result,null,2);return window.result;
 };
+window.compareDeferredSky=function(starFootprint=false){
+ // The deferred sky pass must reproduce the in-loop sky. At one ray per output
+ // pixel and pixel-centre rays the escape map is sampled at its texel centres,
+ // so only half-float storage of the composite separates the two images.
+ // The in-loop sky has no pixel footprint, so footprint widening is off here;
+ // the summed display light then checks that widening conserves star flux.
+ const size={width:640,height:400,scale:400*.028},canvas=document.getElementById("cosmos"),pixels=[],metrics=[],skies=[];
+ for(const deferSky of [false,true]){
+  window.currentEngine?.dispose();const state={...BlackHoleAstrophysics.scenes.isolated,scene:"isolated",observer:"static",display:"intensity",yaw:0,drift:0,time:0,viewZoom:1,zoom:1,paused:true,density:4096,exposure:1,flightRadius:null,flightLens:null};
+  const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:{progressiveSamples:1,rayBudget:size.width*size.height,deferSky,starFootprint},onNeedsFrame(){},onStatus(){}});window.currentEngine=engine;
+  engine.draw(size,0);const gl=canvas.getContext("webgl2"),data=new Uint8Array(size.width*size.height*4);gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.readPixels(0,0,size.width,size.height,gl.RGBA,gl.UNSIGNED_BYTE,data);
+  const image=engine.readback();pixels.push(data);metrics.push({...engine.metrics});
+  if(image.sky){let escaped=0,mapped=0,bad=0;for(let i=0;i<image.diagnostic.length;i+=4){if(image.diagnostic[i]===1)escaped++;const w=image.sky[i+3],g=Math.hypot(image.sky[i],image.sky[i+1],image.sky[i+2])/Math.max(w,1e-30);if(w>0){mapped++;if(!(w<=1+1e-6&&g>0&&Number.isFinite(g)))bad++;}}skies.push({escaped,mapped,bad});}
+ }
+ let differing=0,maximum=0,lit=0,flux=[0,0];const linear=v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;};
+ for(let i=0;i<pixels[0].length;i+=4)for(let k=0;k<3;k++){const d=Math.abs(pixels[0][i+k]-pixels[1][i+k]);maximum=Math.max(maximum,d);if(d>2)differing++;if(pixels[0][i+k]>8)lit++;flux[0]+=linear(pixels[0][i+k]);flux[1]+=linear(pixels[1][i+k]);}
+ // Production path: progressive samples, edge refinement, deferred composite at output resolution.
+ window.currentEngine?.dispose();const state={...BlackHoleAstrophysics.scenes.isolated,scene:"isolated",observer:"static",display:"intensity",yaw:0,drift:0,time:0,viewZoom:1,zoom:1,paused:true,density:16000,exposure:1,flightRadius:null,flightLens:null};
+ const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:{},onNeedsFrame(){},onStatus(){}});window.currentEngine=engine;
+ for(let i=0;i<6;i++)engine.draw(size,0);const gl=canvas.getContext("webgl2"),data=new Uint8Array(size.width*size.height*4);gl.readPixels(0,0,size.width,size.height,gl.RGBA,gl.UNSIGNED_BYTE,data);
+ let productLit=0;for(let i=0;i<data.length;i+=4)if(data[i]+data[i+1]+data[i+2]>24)productLit++;
+ const product={...engine.metrics,productLit,glError:gl.getError()};engine.dispose();window.currentEngine=null;
+ return {differing,maximum,lit,flux,inLoop:metrics[0].skyDeferred,deferred:metrics[1].skyDeferred,skies,product:{skyLit:product.skyLit,skyBuilds:product.skyBuilds,skyWidth:product.skyWidth,skyHeight:product.skyHeight,refineBuilds:product.refineBuilds,progressiveSamples:product.progressiveSamples,productLit,glError:product.glError}};
+};
+window.compareTurn=function(scene){
+ // A stationary axisymmetric scene turned by d must equal a fresh trace at
+ // yaw+d. The turn is a whole number of output pixels so the quantized sky
+ // rotation applies it exactly. Residual star differences are the fresh
+ // trace's own escape-step noise (~1e-4 rad); they shrink with tolerance.
+ const size={width:640,height:400,scale:400*.028},canvas=document.getElementById("cosmos"),preset=BlackHoleAstrophysics.scenes[scene];
+ const base={scene,model:preset.model,spin:preset.spin,charge:preset.charge,band:preset.band,tilt:preset.tilt,observer:"static",display:"intensity",yaw:0,drift:0,time:0,viewZoom:1,zoom:1,paused:true,density:4096,exposure:1,flightRadius:null,flightLens:null};
+ const camera=BlackHoleAstrophysics.camera(base,BlackHoleAstrophysics.model(base)),pixel=1/(size.scale*(camera.framingScale??1)*camera.r),turn=Math.round(.3/pixel)*pixel;
+ const frame=(yaw,turned)=>{window.currentEngine?.dispose();const state={...base,yaw};const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:{progressiveSamples:1,rayBudget:size.width*size.height,deferSky:true},onNeedsFrame(){},onStatus(){}});window.currentEngine=engine;
+  engine.draw(size,0);const builds=engine.metrics.geodesicBuilds;if(turned){state.yaw=yaw+turned;engine.draw(size,0);}
+  const gl=canvas.getContext("webgl2"),data=new Uint8Array(size.width*size.height*4);gl.readPixels(0,0,size.width,size.height,gl.RGBA,gl.UNSIGNED_BYTE,data);return {data,builds,after:engine.metrics.geodesicBuilds,reuses:engine.metrics.turnReuses};};
+ const turned=frame(0,turn),fresh=frame(turn,0),still=frame(0,0);
+ let differing=0,maximum=0,lit=0,moved=0;for(let i=0;i<fresh.data.length;i+=4)for(let k=0;k<3;k++){const d=Math.abs(turned.data[i+k]-fresh.data[i+k]);maximum=Math.max(maximum,d);if(d>2)differing++;if(fresh.data[i+k]>8)lit++;if(Math.abs(still.data[i+k]-fresh.data[i+k])>2)moved++;}
+ // Production: a yaw drag over a settled, refined image keeps the trace.
+ window.currentEngine?.dispose();const state={...base,density:16000};const engine=BlackHolePhysicalRenderer.create({canvas,state,verification:{},onNeedsFrame(){},onStatus(){}});window.currentEngine=engine;
+ for(let i=0;i<6;i++)engine.draw(size,0);const settled={...engine.metrics};state.interacting=true;for(let i=1;i<=5;i++){state.yaw=i*turn/5;engine.draw(size,0);}state.interacting=false;engine.draw(size,0);
+ const product={geodesicBefore:settled.geodesicBuilds,geodesicAfter:engine.metrics.geodesicBuilds,refineBefore:settled.refineBuilds,refineAfter:engine.metrics.refineBuilds,samples:engine.metrics.progressiveSamples,turnReuses:engine.metrics.turnReuses,glError:canvas.getContext("webgl2").getError()};
+ engine.dispose();window.currentEngine=null;
+ return {scene,turn,differing,maximum,lit,moved,reused:turned.after===turned.builds,reuses:turned.reuses,product};
+};
 window.probeCoefficients=function(){
  // Exercise the exact production GLSL at cgs magnitudes. A finite rendered
  // image alone would not detect a zero/NaN radio Planck function.

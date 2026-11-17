@@ -1,10 +1,19 @@
 Interstellar rendering references
 
+Interstellar is free software licensed under the GNU General Public License,
+version 3 (GPL-3.0). The full text is in LICENSE at the repository root:
+https://github.com/RaSteaks/Interstellar/blob/main/LICENSE
+Third-party notices below keep their own, GPL-3.0-compatible terms.
+
 The Kerr-Schild Hamiltonian ray integrator is an independent implementation
 of general-relativistic equations. NPGS BlackHole_common.glsl was inspected
 as a reference for adaptive ray integration and staged rendering; no NPGS
 source code is included in this distribution. NPGS is licensed under GPL-3.0.
 Reference: https://github.com/baopinshui/NPGS/blob/master/NPGS/Sources/Engine/Shaders/BlackHole_common.glsl
+The NPGS shaders were also inspected as a reference for deferring the sky
+lookup to a separate pass, reusing rays under rotation about the spin axis,
+and a downsampled bloom pyramid. physical-renderer.js implements these ideas
+independently; again no NPGS source code is included.
 
 The Page-Thorne thin-disk flux expression in physics.js was adapted from
 grtrans kerr.f90/krolikc and fluid_model_thindisk.f90.

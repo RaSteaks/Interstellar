@@ -31,7 +31,7 @@ PLAYWRIGHT_MODULE=/path/to/playwright node checks/physical-browser.cjs http://12
 
 | 文件 | 运行时机与范围 |
 | --- | --- |
-| `physical-browser.cjs` | 通用渲染/桌面控件变更：多物理场景、系数 CPU/GPU 对照、真实 Worker、原生控件和 Canvas 回退 |
+| `physical-browser.cjs` | 通用渲染/桌面控件变更：多物理场景、延迟天空与循环内天空的显示对照、星点加宽通量、轴对称转视角复用、系数 CPU/GPU 对照、真实 Worker、原生控件和 Canvas 回退 |
 | `mobile-controls.cjs` | 控制面板或尺寸处理变更：4 组代表性布局，触控、短屏滚动、动态标题、重复 resize 与全屏不可用 |
 | `render-performance.cjs` | 渲染缓存/调度变更：GPU 提交、渐进采样、诊断、预算与过滤回退；使用同名 HTML 检查页 |
 | `plunge-orbit-browser.cjs` | 绕行场景变更：GPU 内外视界、盘面演化与真实旅程操作 |

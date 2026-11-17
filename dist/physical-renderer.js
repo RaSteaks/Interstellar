@@ -24,15 +24,100 @@
       layout(location=0) in vec2 aPosition;out vec2 vUv;
       void main(){vUv=aPosition*.5+.5;gl_Position=vec4(aPosition,0.,1.);}
     `;
+    // Shared by the ray kernel and the deferred full-resolution sky pass, so both
+    // evaluate one star field and one spectral table.
+    const spectrumGlsl=`
+      vec3 bandSpectrum(float t){return texture(uSpectrum,vec2((clamp((log(max(t,1e-20))/log(10.)-2.)/8.,0.,1.)*767.+.5)/768.,.5)).rgb;}
+    `;
+    const skyGlsl=`
+      float hash(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
+      float valueNoise(vec3 p){
+        vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
+        return mix(mix(mix(hash(i),hash(i+vec3(1.,0.,0.)),f.x),mix(hash(i+vec3(0.,1.,0.)),hash(i+vec3(1.,1.,0.)),f.x),f.y),
+                   mix(mix(hash(i+vec3(0.,0.,1.)),hash(i+vec3(1.,0.,1.)),f.x),mix(hash(i+vec3(0.,1.,1.)),hash(i+vec3(1.,1.,1.)),f.x),f.y),f.z);
+      }
+      float fbm(vec3 p){float sum=0.,amplitude=.5;for(int i=0;i<4;i++){sum+=amplitude*valueNoise(p);p=p*2.03+17.1;amplitude*=.5;}return sum;}
+      // Dust lanes and clouds depend on direction only. The composite pass reads
+      // them from a cube map baked once; the ray kernel evaluates them directly.
+      vec2 skyNoise(vec3 direction){
+        #ifdef SKY_BAKED
+        return texture(uSkyNoise,direction).xy;
+        #else
+        return vec2(fbm(direction*9.+4.2),fbm(direction*5.+1.7));
+        #endif
+      }
+      // Star layers: cutoff is the fraction of grid corners left empty, band lifts
+      // the density toward the galactic plane. Fluxes follow a power law (many faint
+      // stars, few bright ones) and temperatures lean cool, as in a real field.
+      // footprint is the angle one output pixel spans on the sky (0 inside the
+      // ray kernel). A star narrower than that is widened to it with its total
+      // flux kept: the Gaussian integral scales with width^2, so the peak drops
+      // by width^2/widened^2. Sub-pixel stars stay visible and stop twinkling as
+      // the view turns, and strongly demagnified images near the shadow average
+      // into their true mean brightness instead of aliasing.
+      vec3 starField(vec3 direction,float grid,float cutoff,float g,float band,float footprint){
+        // Star sites sit at half-integer lattice points and are projected onto
+        // the sky sphere of radius grid. Only sites within half a cell of that
+        // sphere carry a star: a property of the site alone, so a star can
+        // never appear for some directions and vanish for their neighbours.
+        // The 8 visited are the two sites bracketing the direction on each
+        // axis, which includes every site closer than one cell per axis and so
+        // every star's full extent. (Earlier, sites around floor() with no
+        // shell test skipped near neighbours and cut stars along cell faces,
+        // hidden while the sky was blurred at ray resolution.) The layer
+        // cutoffs were lowered to keep the former star density in this shell.
+        vec3 cell=floor(direction*grid-.5),result=vec3(0.);
+        float threshold=cutoff-.09*band;
+        for(int i=0;i<8;i++){vec3 c=cell+vec3(float(i&1),float((i>>1)&1),float((i>>2)&1))+.5;
+          if(abs(length(c)-grid)>.5)continue;
+          float seed=hash(c);if(seed<threshold)continue;
+          // A star stays well inside its lattice cube so lensed, stretched images are not clipped at cell borders.
+          vec3 point=normalize(c+(vec3(hash(c+2.),hash(c+7.),hash(c+11.))-.5)*.3);
+          float width=(.07+.1*hash(c+5.))/grid,delta=length(direction-point),widened=width*width+.36*footprint*footprint;
+          float flux=min(.2*pow(1./max(hash(c+9.),.02),.6),2.2);
+          float light=exp(-delta*delta/widened)*flux*(width*width/widened);
+          float temperature=2800.+9500.*pow(hash(c+13.),1.7);vec3 intrinsic=bandSpectrum(temperature),observed=bandSpectrum(temperature*g);
+          result+=observed/max(1e-20,max(max(intrinsic.x,intrinsic.y),intrinsic.z))*light;
+        }return result;
+      }
+      vec3 sky(vec3 direction,float g,float footprint){
+        vec3 plane=normalize(vec3(.88,.34,.33)),center=normalize(vec3(-.2,.82,-.54));
+        float latitude=dot(direction,plane),coreward=.5+.5*dot(direction,center);
+        float band=exp(-latitude*latitude*18.);
+        // Dust lanes absorb part of the unresolved starlight and its stars.
+        vec2 noise=skyNoise(direction);float lanes=smoothstep(.52,.74,noise.x),clouds=.45+.9*noise.y;
+        float milky=band*clouds*(.55+.9*coreward)*(1.-.75*lanes);
+        float haze=.0014*milky;
+        // The same spectral scaling used for the disk handles observer Doppler
+        // colors and intensity. Fixed-color g^3 would overboost hot radio/optical
+        // stars and omit the change of their observed color temperature.
+        vec3 intrinsic=bandSpectrum(5000.);
+        float stellar=1.-.6*band*lanes;
+        return stellar*(starField(direction,45.,.9325,g,band,footprint)+starField(direction,80.,.91,g,band,footprint)+starField(direction,135.,.9475,g,band,footprint))+bandSpectrum(4200.*g)/max(1e-20,max(max(intrinsic.x,intrinsic.y),intrinsic.z))*haze;
+      }
+    `;
+    // The optical PSF is a display cache, independent of physical radiance and
+    // exposure. Manual filtering keeps unsupported float-linear devices smooth.
+    // The ray kernel reuses it to interpolate the coarse grid during refinement.
+    const filter=`
+      vec4 filtered(sampler2D tex,vec2 uv){
+        #ifdef MANUAL_IMAGE_FILTER
+        ivec2 last=textureSize(tex,0)-1;vec2 p=uv*vec2(last+1)-.5,f=fract(p);ivec2 a=ivec2(floor(p));
+        return mix(mix(texelFetch(tex,clamp(a,ivec2(0),last),0),texelFetch(tex,clamp(a+ivec2(1,0),ivec2(0),last),0),f.x),mix(texelFetch(tex,clamp(a+ivec2(0,1),ivec2(0),last),0),texelFetch(tex,clamp(a+ivec2(1),ivec2(0),last),0),f.x),f.y);
+        #else
+        return texture(tex,uv);
+        #endif
+      }
+    `;
     const fragment=`#version 300 es
       precision highp float;precision highp int;precision highp sampler2DArray;
-      in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;layout(location=2) out vec4 diagnostic;
+      in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;layout(location=2) out vec4 diagnostic;layout(location=3) out vec4 skyMap;
       uniform vec3 uOrigin;uniform vec4 uObserver,uRight,uUp,uForward;
       uniform vec2 uExtent,uConstants,uJitter;uniform float uDistance,uSpin,uCharge,uHorizon,uIsco,uInner,uOuter,uTime,uRg,uDensityUnit,uSpectrumReference,uTolerance,uChart,uRadialSpeed,uElectronRatio,uMediumStep,uDiskCount,uSkyRadius,uEmissionScale,uDiskSplit,uFarStep,uInitialStep;
       uniform int uFlow,uBand,uPolarization,uMaxSteps,uFrameCount,uHotspot,uSkyEnabled,uDiskStructure,uAzimuthalCount,uPlaneTransport;
       uniform float uRadialCount,uPolarCount,uPolarMinimum,uPolarSpan,uPhiMinimum,uGasGamma,uAtmosMinimum,uAtmosCoefficient,uAtmosPower;
       uniform sampler2D uDisk,uSpectrum,uBessel,uTheta;
-      uniform sampler2D uCoarseImage,uCoarseDiagnostic;uniform int uRefine;uniform float uEdgeFloor;
+      uniform sampler2D uCoarseImage,uCoarseDiagnostic,uCoarseSky;uniform int uRefine,uDeferSky;uniform float uEdgeFloor;
       uniform sampler2DArray uFluid,uVelocity,uMagnetic;
       const int MAX_FLUID_FRAMES=169; // 41 historical layers + 128 logical-time slots
       uniform float uTimes[MAX_FLUID_FRAMES];uniform int uLayers[MAX_FLUID_FRAMES];uniform vec2 uGrid;
@@ -84,7 +169,7 @@
         return texture(uDisk,vec2((index+.5)/uDiskCount,.5));
         #endif
       }
-      vec3 bandSpectrum(float t){return texture(uSpectrum,vec2((clamp((log(max(t,1e-20))/log(10.)-2.)/8.,0.,1.)*767.+.5)/768.,.5)).rgb;}
+      ${spectrumGlsl}
       float planck(float nu,float t){return plasmaPlanck(nu,t);}
       vec3 bessel(float theta){return texture(uBessel,vec2((clamp((log(theta)/log(10.)+1.3)/5.3,0.,1.)*383.+.5)/384.,.5)).xyz;}
       vec4 fluidLayer(sampler2DArray tex,vec2 uv,float layer){
@@ -310,45 +395,7 @@
         color=bandSpectrum(t*g*hardening)/pow(hardening,4.);alpha=ne*6.6524587321e-25;
       }
       #endif
-      float hash(vec3 p){return fract(sin(dot(p,vec3(127.1,311.7,74.7)))*43758.5453);}
-      float valueNoise(vec3 p){
-        vec3 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);
-        return mix(mix(mix(hash(i),hash(i+vec3(1.,0.,0.)),f.x),mix(hash(i+vec3(0.,1.,0.)),hash(i+vec3(1.,1.,0.)),f.x),f.y),
-                   mix(mix(hash(i+vec3(0.,0.,1.)),hash(i+vec3(1.,0.,1.)),f.x),mix(hash(i+vec3(0.,1.,1.)),hash(i+vec3(1.,1.,1.)),f.x),f.y),f.z);
-      }
-      float fbm(vec3 p){float sum=0.,amplitude=.5;for(int i=0;i<4;i++){sum+=amplitude*valueNoise(p);p=p*2.03+17.1;amplitude*=.5;}return sum;}
-      // Star layers: cutoff is the fraction of grid corners left empty, band lifts
-      // the density toward the galactic plane. Fluxes follow a power law (many faint
-      // stars, few bright ones) and temperatures lean cool, as in a real field.
-      vec3 starField(vec3 direction,float grid,float cutoff,float g,float band){
-        vec3 cell=floor(direction*grid),result=vec3(0.);
-        float threshold=cutoff-.09*band;
-        for(int i=0;i<8;i++){vec3 c=cell+vec3(float(i&1),float((i>>1)&1),float((i>>2)&1))-.5;
-          float seed=hash(c);if(seed<threshold)continue;
-          // A star stays well inside its lattice cube so lensed, stretched images are not clipped at cell borders.
-          vec3 point=normalize(c+(vec3(hash(c+2.),hash(c+7.),hash(c+11.))-.5)*.3);
-          float width=(.07+.1*hash(c+5.))/grid,delta=length(direction-point);
-          float flux=min(.2*pow(1./max(hash(c+9.),.02),.6),2.2);
-          float light=exp(-delta*delta/(width*width))*flux;
-          float temperature=2800.+9500.*pow(hash(c+13.),1.7);vec3 intrinsic=bandSpectrum(temperature),observed=bandSpectrum(temperature*g);
-          result+=observed/max(1e-20,max(max(intrinsic.x,intrinsic.y),intrinsic.z))*light;
-        }return result;
-      }
-      vec3 sky(vec3 direction,float g){
-        vec3 plane=normalize(vec3(.88,.34,.33)),center=normalize(vec3(-.2,.82,-.54));
-        float latitude=dot(direction,plane),coreward=.5+.5*dot(direction,center);
-        float band=exp(-latitude*latitude*18.);
-        // Dust lanes absorb part of the unresolved starlight and its stars.
-        float lanes=smoothstep(.52,.74,fbm(direction*9.+4.2)),clouds=.45+.9*fbm(direction*5.+1.7);
-        float milky=band*clouds*(.55+.9*coreward)*(1.-.75*lanes);
-        float haze=.0014*milky;
-        // The same spectral scaling used for the disk handles observer Doppler
-        // colors and intensity. Fixed-color g^3 would overboost hot radio/optical
-        // stars and omit the change of their observed color temperature.
-        vec3 intrinsic=bandSpectrum(5000.);
-        float stellar=1.-.6*band*lanes;
-        return stellar*(starField(direction,45.,.955,g,band)+starField(direction,80.,.94,g,band)+starField(direction,135.,.965,g,band))+bandSpectrum(4200.*g)/max(1e-20,max(max(intrinsic.x,intrinsic.y),intrinsic.z))*haze;
-      }
+      ${skyGlsl}
       #ifndef THERMAL_SCALAR
       void transportStep(vec3 x,vec3 p,float energy,vec4 a,vec4 b,float h,out vec4 na,out vec4 nb){
         vec4 x1,x2,x3;vec3 p1,p2,p3;rhs(x,p,energy,uSpin,uCharge,x1,p1);
@@ -369,20 +416,19 @@
       // Edge refinement: the refinement pass covers the same field of view at a
       // finer grid. Only fine pixels whose coarse neighbourhood changes ray status
       // or luminance contrast trace a ray; the rest reuse the coarse image.
-      vec4 coarseRadiance(vec2 uv){
-        #ifdef DISK_MANUAL_INTERPOLATION
-        ivec2 last=textureSize(uCoarseImage,0)-1;vec2 q=uv*vec2(last+1)-.5,f=fract(q);ivec2 a=ivec2(floor(q));
-        return mix(mix(texelFetch(uCoarseImage,clamp(a,ivec2(0),last),0),texelFetch(uCoarseImage,clamp(a+ivec2(1,0),ivec2(0),last),0),f.x),mix(texelFetch(uCoarseImage,clamp(a+ivec2(0,1),ivec2(0),last),0),texelFetch(uCoarseImage,clamp(a+ivec2(1),ivec2(0),last),0),f.x),f.y);
-        #else
-        return texture(uCoarseImage,uv);
-        #endif
-      }
+      ${filter}
       bool refineEdge(vec2 uv){
         ivec2 last=textureSize(uCoarseDiagnostic,0)-1,c=clamp(ivec2(floor(uv*vec2(last+1))),ivec2(0),last);
         float status=texelFetch(uCoarseDiagnostic,c,0).x,lo=1e30,hi=0.,lum[9];
+        // With a deferred sky the coarse image holds no stars. Interpolating the
+        // escape direction is only valid where the lens map is smooth, so a
+        // neighbour that left in a visibly different direction (about 1.8 degrees)
+        // forces a fine ray, as near the critical curve.
+        vec4 centerSky=uDeferSky==1?texelFetch(uCoarseSky,c,0):vec4(0.);
         for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
           ivec2 n=clamp(c+ivec2(i,j),ivec2(0),last);
           if(texelFetch(uCoarseDiagnostic,n,0).x!=status)return true;
+          if(centerSky.w>0.){vec4 s=texelFetch(uCoarseSky,n,0);if(s.w>0.&&dot(centerSky.xyz,s.xyz)<.9995*length(centerSky.xyz)*length(s.xyz))return true;}
           float l=dot(texelFetch(uCoarseImage,n,0).rgb,vec3(.2126,.7152,.0722));lum[(j+1)*3+i+1]=l;lo=min(lo,l);hi=max(hi,l);
         }
         if(hi-lo<=.25*(hi+lo)+uEdgeFloor)return false;
@@ -393,7 +439,7 @@
         return bright>=3&&bright<=6;
       }
       void main(){
-        if(uRefine==1&&!refineEdge(vUv)){radiance=coarseRadiance(vUv);stokes=vec4(0.);diagnostic=vec4(0.);return;}
+        if(uRefine==1&&!refineEdge(vUv)){radiance=filtered(uCoarseImage,vUv);stokes=vec4(0.);diagnostic=vec4(0.);skyMap=uDeferSky==1?filtered(uCoarseSky,vUv):vec4(0.);return;}
         rayChart=uChart;
         vec2 impact=(vUv+uJitter-.5)*uExtent;vec3 direction=normalize(vec3(impact/uDistance,1.));
         vec4 spatial=direction.x*uRight+direction.y*uUp+direction.z*uForward;
@@ -510,6 +556,10 @@
           #endif
           h*=clamp(.9*pow(uTolerance/max(error,1e-15),1./3.),.5,2.);
         }
+        // Deferred sky: xyz = unit escape direction * g * transmission, w =
+        // transmission. The premultiplied form stays meaningful under averaging
+        // and bilinear filtering, including next to captured rays (all zero).
+        vec4 deferred=vec4(0.);
         if(status==1&&energy>0.){
           Geometry m=metric(x,uSpin,uCharge);vec3 velocity=raise4(vec4(p,energy),m).xyz;
           if(rayChart<0.){float rotation=2.*atan(uSpin/m.r)+2.*(chartIntegral(m.r).x-chartIntegral(uDistance).x),co=cos(rotation),si=sin(rotation),ur=dot(m.dr,velocity);
@@ -517,7 +567,14 @@
           }
           // Optical stellar backgrounds do not become radio/X-ray sources just
           // because a false-color palette is selected for those instruments.
-          vec3 background=uSkyEnabled==1&&(uBand==0||uBand==3)?sky(normalize(velocity),1./energy):vec3(0.);
+          bool lit=uSkyEnabled==1&&(uBand==0||uBand==3);
+          #ifdef THERMAL_SCALAR
+          float skyWeight=transmission;
+          #else
+          float skyWeight=max(0.,(transfer*vec4(1.,0.,0.,0.)).x);
+          #endif
+          if(uDeferSky==1){if(lit)deferred=vec4(normalize(velocity)*(skyWeight/energy),skyWeight);lit=false;}
+          vec3 background=lit?sky(normalize(velocity),1./energy,0.):vec3(0.);
           #ifdef THERMAL_SCALAR
           total+=background*transmission;totalStokes.x+=transmission*luminance(background);
           #else
@@ -525,6 +582,7 @@
           #endif
         }
         if(any(isnan(total))||any(isinf(total))||any(isnan(totalStokes))||any(isinf(totalStokes))){total=vec3(0.);totalStokes=vec4(0.);status=4;}
+        if(status==4||any(isnan(deferred))||any(isinf(deferred)))deferred=vec4(0.);
         // status=0 is explicitly unfinished, NEVER advertised as capture.
         #ifdef THERMAL_SCALAR
         float residual=transmission;
@@ -532,45 +590,96 @@
         float residual=max(0.,transfer[0].x);
         #endif
         // Alpha exposes residual intensity transmission for scientific checks.
-        radiance=vec4(max(total,vec3(0.)),residual);stokes=totalStokes;diagnostic=vec4(float(status),float(accepted),maxError,status==0?metric(x,uSpin,uCharge).r:depth);
+        radiance=vec4(max(total,vec3(0.)),residual);stokes=totalStokes;diagnostic=vec4(float(status),float(accepted),maxError,status==0?metric(x,uSpin,uCharge).r:depth);skyMap=deferred;
       }
     `;
-    // The optical PSF is a display cache, independent of physical radiance and
-    // exposure. Manual filtering keeps unsupported float-linear devices smooth.
-    const filter=`
-      vec4 filtered(sampler2D tex,vec2 uv){
-        #ifdef MANUAL_IMAGE_FILTER
-        ivec2 last=textureSize(tex,0)-1;vec2 p=uv*vec2(last+1)-.5,f=fract(p);ivec2 a=ivec2(floor(p));
-        return mix(mix(texelFetch(tex,clamp(a,ivec2(0),last),0),texelFetch(tex,clamp(a+ivec2(1,0),ivec2(0),last),0),f.x),mix(texelFetch(tex,clamp(a+ivec2(0,1),ivec2(0),last),0),texelFetch(tex,clamp(a+ivec2(1),ivec2(0),last),0),f.x),f.y);
-        #else
-        return texture(tex,uv);
-        #endif
-      }
-    `;
-    const glow=`#version 300 es
-      precision highp float;in vec2 vUv;out vec4 color;uniform sampler2D uImage;uniform vec2 uPixel;uniform float uUnit;
+    // Bloom pyramid. A bright pass prefilters the image into a base level whose
+    // height is fixed relative to the output (540 lines at 1080p, so the halo
+    // looks the same at any size or DPR), then halving levels are blurred down
+    // and summed back up. Each level's weight sets the halo profile; the wide
+    // levels give the long scattering tail that a single kernel cannot reach.
+    // Levels are RGBA16F, which WebGL2 always filters linearly.
+    const glowPrefilter=`#version 300 es
+      precision highp float;in vec2 vUv;out vec4 color;uniform sampler2D uImage;uniform vec2 uLevel;
       ${filter}
-      // Golden-angle disk with Gaussian weights: an isotropic PSF without the
-      // eight-spoke pattern of a fixed ring. Radii scale with output height, so
-      // the halo looks the same at any window size or device pixel ratio.
-      vec3 halo(float radius,float threshold){
-        vec3 sum=vec3(0.);float total=0.;
-        for(int i=0;i<24;i++){
-          float t=(float(i)+.5)/24.,a=float(i)*2.39996323,w=exp(-2.*t);
-          sum+=max(filtered(uImage,vUv+uPixel*vec2(cos(a),sin(a))*sqrt(t)*radius).rgb-threshold,0.)*w;total+=w;
-        }
-        return sum/total;
+      void main(){
+        // Bilinear taps two source pixels apart cover the whole base texel, so a
+        // one-pixel star is weighted by area and cannot slip between samples.
+        vec2 source=vec2(textureSize(uImage,0)),span=source/uLevel;int n=int(clamp(ceil(max(span.x,span.y)*.5),1.,4.));
+        vec3 sum=vec3(0.);
+        for(int j=0;j<4;j++)for(int i=0;i<4;i++){if(i>=n||j>=n)continue;
+          vec2 offset=((vec2(i,j)+.5)/float(n)-.5)/uLevel;sum+=filtered(uImage,vUv+offset).rgb;}
+        sum/=float(n*n);
+        // Per-channel soft threshold as before; the clamp keeps a single
+        // saturated star from flooding the wide levels.
+        color=vec4(min(max(sum-.8,0.),vec3(200.)),1.);
       }
-      void main(){color=vec4(halo(11.*uUnit,.8)*.104+halo(33.*uUnit,1.5)*.04,1.);}
+    `;
+    // 13-tap downsample (a 4x4 box from four overlapping bilinear 2x2 boxes
+    // plus a centre box): smooth, and free of the square artefacts of 2x2.
+    const glowDown=`#version 300 es
+      precision highp float;in vec2 vUv;out vec4 color;uniform sampler2D uImage;uniform vec2 uTexel;
+      vec3 at(vec2 o){return texture(uImage,vUv+o*uTexel).rgb;}
+      void main(){
+        vec3 centre=at(vec2(-1,-1))+at(vec2(1,-1))+at(vec2(-1,1))+at(vec2(1,1));
+        vec3 corners=at(vec2(-2,-2))+at(vec2(2,-2))+at(vec2(-2,2))+at(vec2(2,2));
+        vec3 edges=at(vec2(0,-2))+at(vec2(-2,0))+at(vec2(2,0))+at(vec2(0,2));
+        color=vec4(centre*.125+corners*.03125+edges*.0625+at(vec2(0))*.125,1.);
+      }
+    `;
+    // Tent upsample of the coarser sum, plus this level weighted.
+    const glowUp=`#version 300 es
+      precision highp float;in vec2 vUv;out vec4 color;uniform sampler2D uImage,uCoarser;uniform vec2 uTexel;uniform float uWeight;uniform int uHasCoarser;
+      vec3 at(vec2 o){return texture(uCoarser,vUv+o*uTexel).rgb;}
+      void main(){
+        vec3 sum=texture(uImage,vUv).rgb*uWeight;
+        if(uHasCoarser==1)sum+=(at(vec2(0))*4.+(at(vec2(-1,0))+at(vec2(1,0))+at(vec2(0,-1))+at(vec2(0,1)))*2.+at(vec2(-1,-1))+at(vec2(1,-1))+at(vec2(-1,1))+at(vec2(1,1)))/16.;
+        color=vec4(sum,1.);
+      }
     `;
     const accumulate=`#version 300 es
-      precision highp float;in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;
-      uniform sampler2D uImage,uStokes,uPreviousImage,uPreviousStokes;uniform float uWeight;
+      precision highp float;in vec2 vUv;layout(location=0) out vec4 radiance;layout(location=1) out vec4 stokes;layout(location=2) out vec4 skyMap;
+      uniform sampler2D uImage,uStokes,uSky,uPreviousImage,uPreviousStokes,uPreviousSky;uniform float uWeight;uniform int uHasSky;
       void main(){
         ivec2 pixel=ivec2(gl_FragCoord.xy);
-        radiance=texelFetch(uImage,pixel,0);stokes=texelFetch(uStokes,pixel,0);
+        radiance=texelFetch(uImage,pixel,0);stokes=texelFetch(uStokes,pixel,0);skyMap=vec4(0.);
         if(uWeight<1.){radiance=mix(texelFetch(uPreviousImage,pixel,0),radiance,uWeight);stokes=mix(texelFetch(uPreviousStokes,pixel,0),stokes,uWeight);}
+        // Without a deferred sky there is no third attachment; skip its fetches.
+        if(uHasSky==1){skyMap=texelFetch(uSky,pixel,0);if(uWeight<1.)skyMap=mix(texelFetch(uPreviousSky,pixel,0),skyMap,uWeight);}
       }
+    `;
+    // Deferred sky pass. The ray kernel stores where each escaping ray left and
+    // how much light survives; the star field is evaluated here once per OUTPUT
+    // pixel, so stars stay sharp whatever the ray budget. uOffset removes the
+    // sub-pixel camera jitter of the traced samples from the map lookup.
+    // The target is half float: radiance above its 65504 range (strongly
+    // blueshifted stars) is clamped so Inf can never reach the glow or tone curve.
+    const skyComposite=`#version 300 es
+      #define SKY_BAKED
+      precision highp float;in vec2 vUv;out vec4 color;
+      uniform sampler2D uImage,uSkyMap,uSpectrum;uniform samplerCube uSkyNoise;uniform vec2 uOffset,uTurn;uniform float uFootprint;
+      ${filter}
+      ${spectrumGlsl}
+      ${skyGlsl}
+      void main(){
+        vec4 light=filtered(uImage,vUv),map=filtered(uSkyMap,vUv-uOffset);float reach=length(map.xyz);
+        // uTurn rotates escape directions about the spin axis by the yaw turned
+        // since the trace (cos, sin); see draw().
+        vec3 direction=vec3(uTurn.x*map.x-uTurn.y*map.y,uTurn.y*map.x+uTurn.x*map.y,map.z)/max(reach,1e-30);
+        // Screen-space derivatives of the lensed direction give the pixel's
+        // footprint on the sky, magnification included. They are taken before
+        // any branch; a quad straddling the shadow edge sees a meaningless
+        // jump, so the footprint is capped well below a star cell.
+        float footprint=uFootprint*min(max(length(dFdx(direction)),length(dFdy(direction))),.004);
+        if(map.w>1e-7&&reach>0.)light.rgb+=map.w*sky(direction,reach/map.w,footprint);
+        color=min(light,vec4(6e4));
+      }
+    `;
+    // One-off bake of the direction-only Milky Way noise into a cube map face.
+    const skyNoiseBake=`#version 300 es
+      precision highp float;in vec2 vUv;out vec4 color;uniform mat3 uFace;
+      ${skyGlsl.slice(0,skyGlsl.indexOf("vec2 skyNoise"))}
+      void main(){vec2 q=vUv*2.-1.;vec3 direction=normalize(uFace*vec3(q,1.));color=vec4(fbm(direction*9.+4.2),fbm(direction*5.+1.7),0.,1.);}
     `;
     const display=`#version 300 es
       precision highp float;in vec2 vUv;out vec4 color;
@@ -643,11 +752,11 @@
     // step, allowing scientific comparisons without adding a runtime GPU branch.
     const integratedFragment=verification.forceUnseededBS?fragment.replace("stepBSSeeded(x,p,time,energy,uSpin,uCharge,h,rayDx,rayDp,nx,np,nt,error,m,rayDx,rayDp);","stepBS(x,p,time,energy,uSpin,uCharge,h,nx,np,nt,error);seedBS(nx,np,energy,uSpin,uCharge,m,rayDx,rayDp);"):fragment;
     const filteredFragment=source=>floatLinear?source:source.replace("#version 300 es","#version 300 es\n#define MANUAL_IMAGE_FILTER");
-    const sampledFragment=floatLinear?integratedFragment:integratedFragment.replace("#version 300 es","#version 300 es\n#define DISK_MANUAL_INTERPOLATION"),traceProgram=program(vertex,sampledFragment),scalarProgram=program(vertex,sampledFragment.replace("#version 300 es","#version 300 es\n#define THERMAL_SCALAR")),displayProgram=program(vertex,filteredFragment(display)),glowProgram=program(vertex,filteredFragment(glow)),accumulateProgram=program(vertex,accumulate),resolveProgram=program(vertex,resolve);
+    const sampledFragment=floatLinear?integratedFragment:integratedFragment.replace("#version 300 es","#version 300 es\n#define DISK_MANUAL_INTERPOLATION\n#define MANUAL_IMAGE_FILTER"),traceProgram=program(vertex,sampledFragment),scalarProgram=program(vertex,sampledFragment.replace("#version 300 es","#version 300 es\n#define THERMAL_SCALAR")),displayProgram=program(vertex,filteredFragment(display)),glowPrefilterProgram=program(vertex,filteredFragment(glowPrefilter)),glowDownProgram=program(vertex,glowDown),glowUpProgram=program(vertex,glowUp),skyProgram=program(vertex,filteredFragment(skyComposite)),skyBakeProgram=program(vertex,skyNoiseBake),accumulateProgram=program(vertex,accumulate),resolveProgram=program(vertex,resolve);
     const quad=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,quad);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]),gl.STATIC_DRAW);resources.push(()=>gl.deleteBuffer(quad));
     gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
     const textures=new Set();
-    function texture(width,height,data=null,depth=0){const t=gl.createTexture(),target=depth?gl.TEXTURE_2D_ARRAY:gl.TEXTURE_2D;gl.bindTexture(target,t);gl.texParameteri(target,gl.TEXTURE_MIN_FILTER,floatLinear?gl.LINEAR:gl.NEAREST);gl.texParameteri(target,gl.TEXTURE_MAG_FILTER,floatLinear?gl.LINEAR:gl.NEAREST);gl.texParameteri(target,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(target,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);if(depth)gl.texImage3D(target,0,gl.RGBA32F,width,height,depth,0,gl.RGBA,gl.FLOAT,data);else gl.texImage2D(target,0,gl.RGBA32F,width,height,0,gl.RGBA,gl.FLOAT,data);textures.add(t);metrics.registeredTextures=textures.size;return t;}
+    function texture(width,height,data=null,depth=0,format=gl.RGBA32F){const t=gl.createTexture(),target=depth?gl.TEXTURE_2D_ARRAY:gl.TEXTURE_2D,linear=floatLinear||format===gl.RGBA16F?gl.LINEAR:gl.NEAREST;gl.bindTexture(target,t);gl.texParameteri(target,gl.TEXTURE_MIN_FILTER,linear);gl.texParameteri(target,gl.TEXTURE_MAG_FILTER,linear);gl.texParameteri(target,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);gl.texParameteri(target,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);if(depth)gl.texImage3D(target,0,gl.RGBA32F,width,height,depth,0,gl.RGBA,gl.FLOAT,data);else gl.texImage2D(target,0,format,width,height,0,gl.RGBA,gl.FLOAT,data);textures.add(t);metrics.registeredTextures=textures.size;return t;}
     const diskCount=2048,diskTexture=texture(diskCount,1),spectrumTexture=texture(768,1),besselTexture=texture(384,1,P.besselTable());
     const thetaData=new Float32Array(512*4);
     for(let i=0;i<512;i++){const angle=i/511;let lo=0,hi=1;for(let j=0;j<40;j++){const t=(lo+hi)/2;if(t+.7/(2*Math.PI)*Math.sin(2*Math.PI*t)>angle)hi=t;else lo=t;}thetaData[i*4]=(lo+hi)/2;}
@@ -655,7 +764,8 @@
     let fluidTextures=[empty,empty,empty],simulation=null,continuation=null,historyFrameCount=0,fluidLayerCount=1,dynamicFrames=new Map(),fluidFrameCache=null,fluidFrameCacheDirty=true,loading=null,disposed=false,target=null,profile=null,profileKey="",geometryKey="",lastTime=-1,refined=false,refinementDue=false,timer=0,ema=25,frameCounter=0,lastWall=null,budgetScale=1,lastInteractive=false,lastActive=false,renderVersion=0,gpuPollTimer=0;
     let cachedModel=null,modelKey="",cachedCamera=null,cameraKey="",driftStep=1e-4,simulationKey="",simulationSerial=0;
     const profileCache=new Map(),spectrumCache=new Map(),gpuJobs=[];
-    let glowTarget=null,accumulationTargets=[],accumulationIndex=0,displayKey="",glowKey="",progressiveKey="",progressiveSamples=0;
+    let glowLevels=[],accumulationTargets=[],accumulationIndex=0,displayKey="",glowKey="",progressiveKey="",progressiveSamples=0;
+    let skyTargets={},skyKey="",skyDeferred=false,skyLit=false,traceJitter=[0,0],skyNoiseTexture=null,skyInteractiveMs=null,traceYaw=0,skyTurn=0;
     let refineTarget=null,refineValid=false,taaTargets=[],taaIndex=0,taaValid=false,taaFrame=0,volumeFence=null;
     let diagnosticRequested=false,diagnosticTimer=0,lastDiagnosticAt=-Infinity,budgetLevel=BUDGET_SCALES.length-1,gpuBudgetMs=null,gpuBudgetAt=0,gpuBudgetSamples=0,budgetSamplesUsed=0,budgetRegime="";
     // Scientific oracles keep their deterministic center ray unless they opt
@@ -667,8 +777,11 @@
     // layers over the same rays. Oracle renderers that pass verification options
     // keep the plain single-ray image unless a check opts in explicitly.
     const enhanced=verification.displayEnhancements===true||Object.keys(verification).length===0;
+    // Oracle renderers keep the sky inside the ray integral, so their radiance
+    // readback stays the complete single-ray result unless a check opts in.
+    const deferSky=verification.deferSky===true||Object.keys(verification).length===0;
     const volumeBackpressure=Object.keys(verification).length===0||verification.volumeBackpressure===true;
-    Object.assign(metrics,{refineBuilds:0,refineWidth:0,refineHeight:0,taaFrames:0,composites:0,glowBuilds:0,diagnosticReadbacks:0,progressiveSamples:0,progressiveTarget:1,progressiveRaySamples:0,budgetLevel,budgetTimingSource:"pending"});
+    Object.assign(metrics,{refineBuilds:0,refineWidth:0,refineHeight:0,taaFrames:0,composites:0,glowBuilds:0,diagnosticReadbacks:0,progressiveSamples:0,progressiveTarget:1,progressiveRaySamples:0,skyBuilds:0,skyDeferred:false,skyLit:false,skyTurn:0,turnReuses:0,budgetLevel,budgetTimingSource:"pending"});
     metrics.timingSource=gpuTimer?"gpu-query-pending":"cpu-submission";metrics.traceTimingSource=metrics.timingSource;metrics.compositeTimingSource=metrics.timingSource;metrics.endToEndTimingSource="cpu-submission";metrics.timingSamples=[];metrics.renderVersion=0;metrics.diagnosticPending=false;metrics.modelBuilds=0;metrics.profileBuilds=0;metrics.observerBuilds=0;metrics.spectrumBuilds=0;
     // The optional verification argument is local to a test renderer. Product
     // configuration never gains accuracy, camera, emissivity or oracle switches.
@@ -684,9 +797,13 @@
         if(Number.isFinite(verification.skyRadius))cachedModel={...cachedModel,skyRadius:verification.skyRadius};
       }return cachedModel;
     }
-    function observer(m){
-      const key=[modelKey,state.tilt,state.viewZoom??state.zoom,state.flightRadius,state.observer,state.look,state.yaw,state.drift].join(":");
-      if(key!==cameraKey){cameraKey=key;cachedCamera=A.camera(state,m);metrics.observerBuilds++;}return cachedCamera;
+    // Defer where the sky is attenuated by one intensity factor: the gray
+    // scalar kernel and empty space. Polarized transfer and the Stokes
+    // displays keep their in-loop background.
+    function defersSky(m){return deferSky&&state.display==="intensity"&&((m.flow==="thermal"&&!verification.forceFullThermal)||m.flow==="vacuum");}
+    function observer(m,yaw=(state.yaw||0)+(state.drift||0)){
+      const key=[modelKey,state.tilt,state.viewZoom??state.zoom,state.flightRadius,state.observer,state.look,yaw].join(":");
+      if(key!==cameraKey){cameraKey=key;cachedCamera=A.camera({...state,yaw,drift:0},m);metrics.observerBuilds++;}return cachedCamera;
     }
     function discardFluidTextures(){
       for(const t of fluidTextures)if(t!==empty){gl.deleteTexture(t);textures.delete(t);}
@@ -762,27 +879,37 @@
     }
     function discardTarget(){
       deleteTarget(target);target=null;accumulationTargets.forEach(deleteTarget);accumulationTargets=[];progressiveSamples=0;progressiveKey="";
-      deleteTarget(refineTarget);refineTarget=null;refineValid=false;taaTargets.forEach(deleteTarget);taaTargets=[];taaValid=false;
+      deleteTarget(refineTarget);refineTarget=null;refineValid=false;taaTargets.forEach(deleteTarget);taaTargets=[];taaValid=false;skyKey="";
     }
-    function createTarget(width,height,count){
+    // slots names the colour attachment of each image; outputs without an
+    // image are routed to NONE and cost no memory or bandwidth.
+    function createTarget(width,height,count,format=gl.RGBA32F,slots=Array.from({length:count},(_,i)=>i)){
       const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);
-      const images=Array.from({length:count},(_,i)=>{const t=texture(width,height);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+i,gl.TEXTURE_2D,t,0);return t;});gl.drawBuffers(images.map((_,i)=>gl.COLOR_ATTACHMENT0+i));
+      const images=slots.map(slot=>{const t=texture(width,height,null,0,format);gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0+slot,gl.TEXTURE_2D,t,0);return t;});
+      gl.drawBuffers(Array.from({length:Math.max(...slots)+1},(_,i)=>slots.includes(i)?gl.COLOR_ATTACHMENT0+i:gl.NONE));
       if(gl.checkFramebufferStatus(gl.FRAMEBUFFER)!==gl.FRAMEBUFFER_COMPLETE){deleteTarget({fbo,images});throw new Error("Physical render framebuffer incomplete");}
       return {fbo,images,width,height};
     }
+    // The escape map is the fourth attachment only while the sky is deferred.
     function ensureTarget(width,height){
-      if(target?.width===width&&target?.height===height)return;discardTarget();target=createTarget(width,height,3);
+      const count=skyDeferred?4:3;
+      if(target?.width===width&&target?.height===height&&target.images.length===count)return;discardTarget();target=createTarget(width,height,count);
     }
     function accumulateSample(){
-      if(!accumulationTargets.length)accumulationTargets=[createTarget(target.width,target.height,2),createTarget(target.width,target.height,2)];
+      // The escape map is averaged with the same weights as the radiance. A mode
+      // switch at unchanged size restarts sampling, so stale targets hold nothing.
+      const count=skyDeferred?3:2;
+      if(accumulationTargets.length&&accumulationTargets[0].images.length!==count){accumulationTargets.forEach(deleteTarget);accumulationTargets=[];}
+      if(!accumulationTargets.length)accumulationTargets=[createTarget(target.width,target.height,count),createTarget(target.width,target.height,count)];
       const previous=accumulationTargets[accumulationIndex];accumulationIndex=1-accumulationIndex;const next=accumulationTargets[accumulationIndex],p=accumulateProgram;
       // Explicit ping-pong averaging does not require EXT_float_blend and never
       // samples a texture attached to the framebuffer currently being written.
       gl.bindFramebuffer(gl.FRAMEBUFFER,next.fbo);gl.viewport(0,0,target.width,target.height);gl.useProgram(p.p);
-      sampler(p,"uImage",0,target.images[0]);sampler(p,"uStokes",1,target.images[1]);sampler(p,"uPreviousImage",2,previous.images[0]);sampler(p,"uPreviousStokes",3,previous.images[1]);
+      sampler(p,"uImage",0,target.images[0]);sampler(p,"uStokes",1,target.images[1]);sampler(p,"uPreviousImage",2,previous.images[0]);sampler(p,"uPreviousStokes",3,previous.images[1]);sampler(p,"uSky",4,skyDeferred?target.images[3]:diskTexture);sampler(p,"uPreviousSky",5,skyDeferred?previous.images[2]:diskTexture);gl.uniform1i(p.u.uHasSky,skyDeferred?1:0);
       gl.uniform1f(p.u.uWeight,1/(progressiveSamples+1));gl.drawArrays(gl.TRIANGLES,0,6);
     }
-    function baseImages(){return progressiveSamples>0&&metrics.progressiveTarget>1?accumulationTargets[accumulationIndex].images:target.images;}
+    function accumulated(){return progressiveSamples>0&&metrics.progressiveTarget>1;}
+    function baseImages(){return accumulated()?accumulationTargets[accumulationIndex].images:target.images;}
     function displayImages(){
       const base=baseImages();
       if(refineValid&&refineTarget)return [refineTarget.images[0],base[1],base[2]];
@@ -791,9 +918,47 @@
     }
     // The refinement target only needs radiance; the shader's other two outputs
     // are routed to NONE so the finer grid costs a single RGBA32F attachment.
+    // A deferred sky adds the escape map at the kernel's fourth output.
     function ensureRefineTarget(width,height){
-      if(refineTarget?.width===width&&refineTarget?.height===height)return refineTarget;
-      deleteTarget(refineTarget);refineTarget=createTarget(width,height,1);gl.drawBuffers([gl.COLOR_ATTACHMENT0,gl.NONE,gl.NONE]);return refineTarget;
+      const count=skyDeferred?2:1;
+      if(refineTarget?.width===width&&refineTarget?.height===height&&refineTarget.images.length===count)return refineTarget;
+      deleteTarget(refineTarget);refineTarget=null;refineTarget=createTarget(width,height,count,gl.RGBA32F,skyDeferred?[0,3]:[0]);return refineTarget;
+    }
+    function skyMapImage(){
+      if(refineValid&&refineTarget?.images.length===2)return refineTarget.images[1];
+      return accumulated()&&accumulationTargets[accumulationIndex]?.images.length===3?accumulationTargets[accumulationIndex].images[2]:target.images[3];
+    }
+    // Cube faces in GL order (+X,-X,+Y,-Y,+Z,-Z): columns map the face
+    // coordinates (s,t,1) to a direction, matching the cube map lookup rule.
+    const CUBE_FACES=[[0,0,-1,0,-1,0,1,0,0],[0,0,1,0,-1,0,-1,0,0],[1,0,0,0,0,1,0,1,0],[1,0,0,0,0,-1,0,-1,0],[1,0,0,0,-1,0,0,0,1],[-1,0,0,0,-1,0,0,0,-1]];
+    function bakeSkyNoise(){
+      // fbm's finest octave spans about 70 cycles per radian; 512 texels per
+      // face resolves it. Half float keeps the [0,1] noise to 11 bits (6 MB).
+      const size=512,t=gl.createTexture();gl.bindTexture(gl.TEXTURE_CUBE_MAP,t);gl.texStorage2D(gl.TEXTURE_CUBE_MAP,1,gl.RG16F,size,size);
+      for(const parameter of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T,gl.TEXTURE_WRAP_R])gl.texParameteri(gl.TEXTURE_CUBE_MAP,parameter,gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MIN_FILTER,gl.LINEAR);gl.texParameteri(gl.TEXTURE_CUBE_MAP,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      const fbo=gl.createFramebuffer();gl.bindFramebuffer(gl.FRAMEBUFFER,fbo);gl.drawBuffers([gl.COLOR_ATTACHMENT0]);gl.viewport(0,0,size,size);gl.useProgram(skyBakeProgram.p);
+      CUBE_FACES.forEach((face,i)=>{gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_CUBE_MAP_POSITIVE_X+i,t,0);gl.uniformMatrix3fv(skyBakeProgram.u.uFace,false,face);gl.drawArrays(gl.TRIANGLES,0,6);});
+      gl.deleteFramebuffer(fbo);resources.push(()=>gl.deleteTexture(t));return t;
+    }
+    // Disk light plus the star field. Settled frames evaluate it once per output
+    // pixel; interactive frames cap it at one megapixel so the sky pass cannot
+    // take the ray budget during a drag. The escape map itself stays RGBA32F
+    // because a direction needs more than eleven bits to place a star.
+    function compositeSky(size,radianceImage,quality){
+      const kind=quality?"quality":"interactive",key=[renderVersion,refineValid,kind,skyTurn,size.width,size.height].join(":");if(key===skyKey)return skyTargets[kind].images[0];
+      const fit=quality?1:Math.min(1,Math.sqrt(1e6/(size.width*size.height))),width=Math.max(1,Math.round(size.width*fit)),height=Math.max(1,Math.round(size.height*fit));
+      let sky=skyTargets[kind];if(sky?.width!==width||sky?.height!==height){deleteTarget(sky);sky=skyTargets[kind]=createTarget(width,height,1,gl.RGBA16F);}
+      skyNoiseTexture??=bakeSkyNoise();
+      const p=skyProgram,started=performance.now();gl.bindFramebuffer(gl.FRAMEBUFFER,sky.fbo);gl.viewport(0,0,width,height);gl.useProgram(p.p);
+      sampler(p,"uImage",0,radianceImage);sampler(p,"uSkyMap",1,skyMapImage());sampler(p,"uSpectrum",2,spectrumTexture);
+      gl.activeTexture(gl.TEXTURE3);gl.bindTexture(gl.TEXTURE_CUBE_MAP,skyNoiseTexture);gl.uniform1i(p.u.uSkyNoise,3);
+      // Refined maps are traced on pixel centres. A single trace carries its own
+      // jitter; an accumulated map carries the mean of the static pattern.
+      let offset=traceJitter;
+      if(accumulated()){offset=[0,0];for(let i=0;i<progressiveSamples;i++){offset[0]+=STATIC_JITTER[i][0]/progressiveSamples;offset[1]+=STATIC_JITTER[i][1]/progressiveSamples;}}
+      gl.uniform2f(p.u.uOffset,refineValid?0:offset[0]/target.width,refineValid?0:offset[1]/target.height);gl.uniform2f(p.u.uTurn,Math.cos(skyTurn),Math.sin(skyTurn));gl.uniform1f(p.u.uFootprint,verification.starFootprint===false?0:1);
+      const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"sky",performance.now()-started,{interactive:!quality,regime:budgetRegime});skyKey=key;metrics.skyBuilds++;metrics.skyWidth=width;metrics.skyHeight=height;return sky.images[0];
     }
     function halton(index,base){let f=1,r=0;while(index>0){f/=base;r+=f*(index%base);index=Math.floor(index/base);}return r;}
     function taaJitter(){const i=taaFrame++%8+1;return [(halton(i,2)-.5)*.9,(halton(i,3)-.5)*.9];}
@@ -810,16 +975,33 @@
       const scale=Math.min(2,size.width/target.width);if(scale<1.2){refineValid=false;return;}
       const area=target.width*target.height*scale*scale,limit=scale*Math.min(1,Math.sqrt(4.2e6/area));
       render(size,quality,[0,0],{width:Math.round(target.width*limit),height:Math.round(target.height*limit)});
-      refineValid=true;displayKey="";glowKey="";
+      refineValid=true;displayKey="";glowKey="";skyKey="";
     }
+    // Halo profile: weight of each pyramid level, finest first. Level k has
+    // texels of 2^(k+1) lines at 1080p. The total, .144, matches the energy of
+    // the former two-ring kernel (.104 + .04).
+    const GLOW_WEIGHTS=[.012,.024,.034,.03,.022,.013,.009];
     function updateGlow(size,images){
-      const key=[renderVersion,size.width,size.height].join(":");if(key===glowKey)return;
-      const scale=Math.min(.25,640/Math.max(size.width,size.height)),width=Math.max(1,Math.ceil(size.width*scale)),height=Math.max(1,Math.ceil(size.height*scale));
-      if(glowTarget?.width!==width||glowTarget?.height!==height){deleteTarget(glowTarget);glowTarget=createTarget(width,height,1);}
-      const p=glowProgram,started=performance.now();gl.bindFramebuffer(gl.FRAMEBUFFER,glowTarget.fbo);gl.viewport(0,0,width,height);gl.useProgram(p.p);
-      sampler(p,"uImage",0,images[0]);gl.uniform2f(p.u.uPixel,1/size.width,1/size.height);gl.uniform1f(p.u.uUnit,size.height/1080);
-      const query=startTiming();gl.drawArrays(gl.TRIANGLES,0,6);finishTiming(query,"glow",performance.now()-started);glowKey=key;metrics.glowBuilds++;
+      const key=[renderVersion,skyTurn,size.width,size.height].join(":");if(key===glowKey)return;
+      // The base is 540 lines tall at any output above that, so level texels
+      // stay a fixed fraction of the frame height.
+      const levels=[];let height=Math.max(8,Math.min(size.height,540)),width=Math.max(8,Math.round(height*size.width/size.height));
+      for(let k=0;k<GLOW_WEIGHTS.length&&Math.min(width,height)>=4;k++){levels.push([width,height]);width=Math.max(1,Math.ceil(width/2));height=Math.max(1,Math.ceil(height/2));}
+      if(glowLevels.length!==levels.length||glowLevels.some((level,k)=>level.down.width!==levels[k][0]||level.down.height!==levels[k][1])){
+        glowLevels.forEach(level=>{deleteTarget(level.down);deleteTarget(level.up);});
+        glowLevels=levels.map(([w,h])=>({down:createTarget(w,h,1,gl.RGBA16F),up:createTarget(w,h,1,gl.RGBA16F)}));
+      }
+      const started=performance.now(),query=startTiming(),pass=(target,program)=>{gl.bindFramebuffer(gl.FRAMEBUFFER,target.fbo);gl.viewport(0,0,target.width,target.height);gl.useProgram(program.p);};
+      pass(glowLevels[0].down,glowPrefilterProgram);sampler(glowPrefilterProgram,"uImage",0,images[0]);gl.uniform2f(glowPrefilterProgram.u.uLevel,glowLevels[0].down.width,glowLevels[0].down.height);gl.drawArrays(gl.TRIANGLES,0,6);
+      for(let k=1;k<glowLevels.length;k++){const from=glowLevels[k-1].down;pass(glowLevels[k].down,glowDownProgram);sampler(glowDownProgram,"uImage",0,from.images[0]);gl.uniform2f(glowDownProgram.u.uTexel,1/from.width,1/from.height);gl.drawArrays(gl.TRIANGLES,0,6);}
+      for(let k=glowLevels.length-1;k>=0;k--){
+        const level=glowLevels[k],coarser=glowLevels[k+1]?.up;pass(level.up,glowUpProgram);
+        sampler(glowUpProgram,"uImage",0,level.down.images[0]);sampler(glowUpProgram,"uCoarser",1,(coarser||level.down).images[0]);
+        gl.uniform1i(glowUpProgram.u.uHasCoarser,coarser?1:0);gl.uniform1f(glowUpProgram.u.uWeight,GLOW_WEIGHTS[k]);gl.uniform2f(glowUpProgram.u.uTexel,coarser?1/coarser.width:0,coarser?1/coarser.height:0);gl.drawArrays(gl.TRIANGLES,0,6);
+      }
+      finishTiming(query,"glow",performance.now()-started);glowKey=key;metrics.glowBuilds++;metrics.glowLevels=glowLevels.length;
     }
+    function glowImage(){return glowLevels[0].up.images[0];}
     function updateProfile(m){
       const key=[state.scene,m.spin,m.charge,m.outer,state.band,verification.spectrumReferenceTemperature].join(":");if(key===profileKey)return;profileKey=key;
       const sourceInner=m.flow==="grmhd3d"?simulation?.metadata.innerRadius:null,diskKey=[state.scene,m.spin,m.charge,m.outer,m.massRate,sourceInner].join(":");let disk=profileCache.get(diskKey);
@@ -867,6 +1049,9 @@
             if(!disjoint&&job.kind==="trace"&&job.interactive&&job.regime===budgetRegime&&job.frame>=frameCounter-60){
               const perRay=ms/job.rays;gpuBudgetMs=gpuBudgetMs===null?perRay:.8*gpuBudgetMs+.2*perRay;gpuBudgetSamples++;gpuBudgetAt=now;
             }
+            // Only interactive sky passes of the current regime predict the cost
+            // of the next drag frame; settled full-resolution passes do not.
+            if(!disjoint&&job.kind==="sky"&&job.interactive&&job.regime===budgetRegime&&job.frame>=frameCounter-60)skyInteractiveMs=skyInteractiveMs===null?ms:.8*skyInteractiveMs+.2*ms;
           }else if(job.kind==="diagnostic"){
             // Moving frames may finish after the observation advances. Publish
             // their provenance with diagnosticCurrent=false rather than starving
@@ -910,9 +1095,9 @@
     }
     function adaptBudget(active,duration,regime){
       if(!active||Number.isFinite(verification.rayBudget))return;
-      if(regime!==budgetRegime){budgetRegime=regime;gpuBudgetMs=null;gpuBudgetSamples=0;budgetSamplesUsed=0;}
+      if(regime!==budgetRegime){budgetRegime=regime;gpuBudgetMs=null;gpuBudgetSamples=0;budgetSamplesUsed=0;skyInteractiveMs=null;}
       if(gpuTimer&&gpuBudgetMs!==null&&performance.now()-gpuBudgetAt<1000){
-        ema=gpuBudgetMs*Math.max(1,metrics.raySamples)+(metrics.compositeMs||0)+(metrics.glowMs||0);metrics.budgetTimingSource="gpu-query";
+        ema=gpuBudgetMs*Math.max(1,metrics.raySamples)+(metrics.compositeMs||0)+(metrics.glowMs||0)+(skyLit?skyInteractiveMs??0:0);metrics.budgetTimingSource="gpu-query";
         if(gpuBudgetSamples-budgetSamplesUsed<3)return;budgetSamplesUsed=gpuBudgetSamples;
       }else{
         // Without a valid GPU timer, elapsed frame time is an explicitly named
@@ -942,11 +1127,17 @@
       metrics.historyMissing=Boolean(dynamic.length&&!keepHistory);
       fluidFrameCache={times,layers,count};fluidFrameCacheDirty=false;return fluidFrameCache;
     }
-    function render(size,quality,jitter=[0,0],refine=null){
-      const started=performance.now(),m=sceneModel(),camera=observer(m);updateProfile(m);
+    // A fresh trace launches at the current yaw. Progressive samples and edge
+    // refinement extend that same image, so they reuse its launch yaw even when
+    // the view has turned since (see draw()).
+    function render(size,quality,jitter=[0,0],refine=null,continuing=false){
+      if(!refine&&!continuing)traceYaw=(state.yaw||0)+(state.drift||0);
+      const started=performance.now(),m=sceneModel(),camera=observer(m,traceYaw);updateProfile(m);
       const requested=state.density||160000,budget=verification.rayBudget??Math.min(quality?requested*2:Math.max(16000,requested*budgetScale),quality?650000:240000,size.width*size.height);
-      const aspect=size.width/size.height,height=Math.max(32,Math.floor(Math.sqrt(budget/aspect))),width=Math.max(32,Math.floor(height*aspect));if(!refine){ensureTarget(width,height);renderVersion++;metrics.renderVersion=renderVersion;metrics.diagnosticCurrent=false;refineValid=false;}
       const scalar=m.flow==="thermal"&&state.display==="intensity"&&!verification.forceFullThermal,p=scalar?scalarProgram:traceProgram,u=p.u;
+      // Decided before the target is sized: only a deferred sky allocates the
+      if(!refine){skyDeferred=defersSky(m);skyLit=skyDeferred&&verification.skyEnabled!==false&&(state.band==="visible"||state.band==="bolometric");metrics.skyDeferred=skyDeferred;metrics.skyLit=skyLit;}
+      const aspect=size.width/size.height,height=Math.max(32,Math.floor(Math.sqrt(budget/aspect))),width=Math.max(32,Math.floor(height*aspect));if(!refine){ensureTarget(width,height);renderVersion++;metrics.renderVersion=renderVersion;metrics.diagnosticCurrent=false;refineValid=false;}
       const outWidth=refine?refine.width:width,outHeight=refine?refine.height:height;
       gl.bindFramebuffer(gl.FRAMEBUFFER,(refine?ensureRefineTarget(outWidth,outHeight):target).fbo);gl.viewport(0,0,outWidth,outHeight);gl.useProgram(p.p);
       gl.uniform3fv(u.uOrigin,camera.position);gl.uniform4fv(u.uObserver,camera.u);gl.uniform4fv(u.uRight,camera.basis[0]);gl.uniform4fv(u.uUp,camera.basis[1]);gl.uniform4fv(u.uForward,camera.basis[2]);
@@ -978,7 +1169,8 @@
       gl.uniform1f(u.uGasGamma,metadata?.adiabaticIndex??5/3);gl.uniform1f(u.uAtmosMinimum,metadata?.densityFloor?.constant??0);gl.uniform1f(u.uAtmosCoefficient,metadata?.densityFloor?.coefficient??1e-7);gl.uniform1f(u.uAtmosPower,metadata?.densityFloor?.power??-1.5);
       if(u.uTimes!=null){const frames=fluidFrameUniforms();if(metadata)gl.uniform2f(u.uGrid,metadata.radialStart,metadata.radialStep);else{frames.times[0]=0;frames.layers[0]=0;gl.uniform2f(u.uGrid,0,1);}gl.uniform1fv(u.uTimes,frames.times);if(u.uLayers)gl.uniform1iv(u.uLayers,frames.layers);gl.uniform1i(u.uFrameCount,frames.count);}
       sampler(p,"uDisk",0,diskTexture);sampler(p,"uSpectrum",1,spectrumTexture);sampler(p,"uBessel",2,besselTexture);sampler(p,"uTheta",3,thetaTexture);["uFluid","uVelocity","uMagnetic"].forEach((name,i)=>sampler(p,name,4+i,fluidTextures[i],true));
-      if(u.uRefine!=null)gl.uniform1i(u.uRefine,refine?1:0);
+      if(u.uRefine!=null)gl.uniform1i(u.uRefine,refine?1:0);if(u.uDeferSky!=null)gl.uniform1i(u.uDeferSky,skyDeferred?1:0);
+      sampler(p,"uCoarseSky",9,refine&&skyDeferred?skyMapImage():diskTexture);
       // WebGL checks active samplers even when uRefine disables their branch.
       // Ordinary traces use a lookup texture so a previous refinement cannot
       // leave the coarse framebuffer sampling its own attachments.
@@ -1012,8 +1204,16 @@
       // Idle drift advances the camera azimuth continuously, so the retrace gate
       // quantizes it to driftStep (about DRIFT_RETRACE_PIXELS output pixels) rather
       // than to a fixed angle. View changes coarser than that still retrace exactly.
-      const azimuth=Math.round((state.yaw+(state.drift||0))/Math.max(1e-9,driftStep)),key=[state.scene,state.model,state.spin,state.charge,state.tilt,state.viewZoom,state.flightRadius,state.flightLens,azimuth,state.band,state.observer,state.look,state.display,state.density,size.width,size.height,size.scale].join(":");
-      const evolving=currentModel.recorded||state.scene==="hotspot"||Boolean(currentModel.diskStructure),changed=key!==geometryKey,active=Boolean(state.interacting||(evolving&&!state.paused));
+      // A stationary axisymmetric scene (structureless thermal disk or vacuum)
+      // is invariant under rotation about the spin axis: the observer, its
+      // tetrad and every ray at yaw+d are the yaw rays rotated by d about z in
+      // Kerr-Schild Cartesian coordinates. The image is unchanged except for
+      // the sky, so a turn only rotates the deferred escape map in the composite
+      // (quantized to one output pixel) instead of retracing.
+      const evolving=currentModel.recorded||state.scene==="hotspot"||Boolean(currentModel.diskStructure);
+      const turnable=!evolving&&defersSky(currentModel),yaw=(state.yaw||0)+(state.drift||0);
+      const azimuth=turnable?"turn":Math.round(yaw/Math.max(1e-9,driftStep)),key=[state.scene,state.model,state.spin,state.charge,state.tilt,state.viewZoom,state.flightRadius,state.flightLens,azimuth,state.band,state.observer,state.look,state.display,state.density,size.width,size.height,size.scale].join(":");
+      const changed=key!==geometryKey,active=Boolean(state.interacting||(evolving&&!state.paused));
       if(changed){geometryKey=key;refinementDue=Boolean(state.paused&&!state.interacting);clearTimeout(timer);if(!active&&!state.paused)timer=setTimeout(()=>{refinementDue=true;onNeedsFrame();},180);}
       // Settling a drag, pausing playback and switching the budget can change
       // required quality without changing camera geometry. Compare quality to
@@ -1021,33 +1221,40 @@
       if((lastInteractive&&!state.interacting)||(lastActive&&!active))refinementDue=true;
       lastInteractive=Boolean(state.interacting);lastActive=active;
       adaptBudget(active,duration,state.scene+":"+(currentModel.flow==="thermal"&&state.display==="intensity"&&!verification.forceFullThermal));
-      const quality=Boolean(!state.interacting&&(state.paused||(!active&&refinementDue)));
+      let quality=Boolean(!state.interacting&&(state.paused||(!active&&refinementDue)));
+      // A refined trace stays valid while the view only turns, so a yaw drag
+      // keeps the settled disk instead of dropping to the interactive budget.
+      const kept=turnable&&!changed&&Boolean(target)&&refined&&!quality;if(kept)quality=true;
       const temporal=enhanced&&!quality&&active&&state.display==="intensity"&&!verification.sampleJitter;
       const goal=progressiveEnabled&&quality&&state.paused&&!state.interacting&&state.display!=="accuracy"?progressiveLimit:1;
       const sampleKey=[key,quality,goal,evolving?state.time:0,!quality&&!Number.isFinite(verification.rayBudget)?budgetLevel:0].join(":");
-      const retrace=changed||(evolving&&lastTime!==state.time)||quality!==refined||!target||sampleKey!==progressiveKey;
+      const retrace=!kept&&(changed||(evolving&&lastTime!==state.time)||quality!==refined||!target||sampleKey!==progressiveKey);
       if(retrace){
         progressiveSamples=0;metrics.progressiveRaySamples=0;
-        render(size,quality,goal>1?STATIC_JITTER[0]:temporal?taaJitter():(verification.sampleJitter||[0,0]));
+        const jitter=goal>1?STATIC_JITTER[0]:temporal?taaJitter():(verification.sampleJitter||[0,0]);
+        render(size,quality,jitter);traceJitter=jitter;
         if(temporal)resolveTemporal();else taaValid=false;
         progressiveKey=sampleKey;metrics.progressiveTarget=goal;
         if(goal>1)accumulateSample();progressiveSamples=1;
         lastTime=state.time;refined=quality;
-      }else if(goal>1&&progressiveSamples<goal){
-        render(size,quality,STATIC_JITTER[progressiveSamples]);accumulateSample();progressiveSamples++;
+      }else if(!kept&&goal>1&&progressiveSamples<goal){
+        const jitter=STATIC_JITTER[progressiveSamples];render(size,quality,jitter,null,true);traceJitter=jitter;accumulateSample();progressiveSamples++;
       }
       metrics.progressiveSamples=progressiveSamples;metrics.progressiveRaySamples=progressiveSamples*metrics.raySamples;
-      if(goal>1&&progressiveSamples<goal)onNeedsFrame();
+      if(!kept&&goal>1&&progressiveSamples<goal)onNeedsFrame();
+      const previousTurn=skyTurn,pixel=Math.max(1e-9,driftStep/DRIFT_RETRACE_PIXELS);skyTurn=turnable&&skyLit?Math.round((yaw-traceYaw)/pixel)*pixel:0;
+      if(skyTurn!==previousTurn&&!retrace)metrics.turnReuses++;metrics.skyTurn=skyTurn;
       if(enhanced&&quality&&(goal===1||progressiveSamples===goal)&&!refineValid&&state.display==="intensity"&&!verification.skipRefine)refineEdges(size,quality);
       // Finish static sampling before reading diagnostics. Active playback reads
       // at a bounded cadence; its counters always retain the originating version.
       if(goal===1||progressiveSamples===goal)queueDiagnostic(quality);
-      const nextDisplayKey=[renderVersion,state.exposure,state.band,state.display,size.width,size.height].join(":");
+      const nextDisplayKey=[renderVersion,skyTurn,state.exposure,state.band,state.display,size.width,size.height].join(":");
       metrics.frameMs=ema;metrics.budgetScale=budgetScale;
       if(nextDisplayKey===displayKey)return;
-      const images=displayImages();updateGlow(size,images);
+      let images=displayImages();if(skyLit)images=[compositeSky(size,images[0],refined),images[1],images[2]];
+      updateGlow(size,images);
       const compositeStarted=performance.now();gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,size.width,size.height);gl.useProgram(displayProgram.p);
-      sampler(displayProgram,"uImage",0,images[0]);sampler(displayProgram,"uStokes",1,images[1]);sampler(displayProgram,"uDiagnostic",2,target.images[2]);sampler(displayProgram,"uGlow",3,glowTarget.images[0]);
+      sampler(displayProgram,"uImage",0,images[0]);sampler(displayProgram,"uStokes",1,images[1]);sampler(displayProgram,"uDiagnostic",2,target.images[2]);sampler(displayProgram,"uGlow",3,glowImage());
       const displayGain=A.scenes[state.scene]?.displayGain||1;
       // Exposure only composites existing float buffers and never rebuilds the
       // model, disk/spectrum table, observer or geodesics.
@@ -1066,15 +1273,19 @@
       continuation?.reset();onNeedsFrame();
     }
     function setSolverActive(value){continuation?.setActive(Boolean(value));}
-    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);clearTimeout(diagnosticTimer);if(volumeFence)gl.deleteSync(volumeFence);volumeFence=null;continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();deleteTarget(glowTarget);glowTarget=null;textures.forEach(t=>gl.deleteTexture(t));textures.clear();metrics.registeredTextures=0;resources.reverse().forEach(f=>f());}
+    function dispose(){if(disposed)return;disposed=true;clearTimeout(timer);clearTimeout(gpuPollTimer);clearTimeout(diagnosticTimer);if(volumeFence)gl.deleteSync(volumeFence);volumeFence=null;continuation?.destroy();gpuJobs.forEach(deleteJob);gpuJobs.length=0;discardTarget();glowLevels.forEach(level=>{deleteTarget(level.down);deleteTarget(level.up);});glowLevels=[];Object.values(skyTargets).forEach(deleteTarget);skyTargets={};textures.forEach(t=>gl.deleteTexture(t));textures.clear();metrics.registeredTextures=0;resources.reverse().forEach(f=>f());}
     return {kind:"webgl",physical:true,metrics,count:()=>metrics.raySamples,draw,resetSimulation,setSolverActive,refine(){refinementDue=true;onNeedsFrame();},dispose,
       // Full synchronous test readback intentionally waits for GPU completion;
       // production diagnostics above never issue a blocking typed-array read.
       // Raw readback remains a single-ray scientific oracle. Display readback
       // optionally returns linear averaged Stokes/radiance, with unaveraged
       // diagnostic codes from the latest completed sample in either case.
-      readback({display=false}={}){if(!target)return null;gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);const accumulated=display&&metrics.progressiveTarget>1&&progressiveSamples>0;
-        const outputs=target.images.map((_,i)=>{const source=accumulated&&i<2?accumulationTargets[accumulationIndex]:target;gl.bindFramebuffer(gl.FRAMEBUFFER,source.fbo);const data=new Float32Array(target.width*target.height*4);gl.readBuffer(gl.COLOR_ATTACHMENT0+i);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,data);return data;});gl.bindFramebuffer(gl.FRAMEBUFFER,null);diagnosticMetrics(outputs[2],renderVersion,state.time);return {width:target.width,height:target.height,renderVersion,samples:accumulated?progressiveSamples:1,radiance:outputs[0],stokes:outputs[1],diagnostic:outputs[2]};}};
+      // While the sky is deferred, radiance holds no starlight; sky then carries
+      // the escape map (direction x g x weight, weight), averaged like radiance.
+      readback({display=false}={}){if(!target)return null;gl.bindBuffer(gl.PIXEL_PACK_BUFFER,null);const averaged=display&&accumulated();
+        const read=(source,attachment)=>{gl.bindFramebuffer(gl.FRAMEBUFFER,source.fbo);const data=new Float32Array(target.width*target.height*4);gl.readBuffer(gl.COLOR_ATTACHMENT0+attachment);gl.readPixels(0,0,target.width,target.height,gl.RGBA,gl.FLOAT,data);return data;};
+        const outputs=[0,1,2].map(i=>averaged&&i<2?read(accumulationTargets[accumulationIndex],i):read(target,i)),sky=skyDeferred?(averaged?read(accumulationTargets[accumulationIndex],2):read(target,3)):null;
+        gl.readBuffer(gl.COLOR_ATTACHMENT0);gl.bindFramebuffer(gl.FRAMEBUFFER,null);diagnosticMetrics(outputs[2],renderVersion,state.time);return {width:target.width,height:target.height,renderVersion,samples:averaged?progressiveSamples:1,radiance:outputs[0],stokes:outputs[1],diagnostic:outputs[2],skyDeferred,sky};}};
   }
   globalThis.BlackHolePhysicalRenderer=Object.freeze({create});
 })();

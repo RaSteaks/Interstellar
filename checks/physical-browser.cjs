@@ -29,6 +29,23 @@ const output=path.join(__dirname,'../verification/physical');fs.mkdirSync(output
    if(options.viewZoom===12)assert.ok(result.observerDistance<(await gpu.evaluate(()=>BlackHoleAstrophysics.model(caseState))).horizon);
    report.gpu.push(result);console.log('GPU PASS',options.scene,options.viewZoom||1,result.raySamples);
   }
+  const deferred=await gpu.evaluate(()=>compareDeferredSky());
+  assert.equal(deferred.inLoop,false);assert.equal(deferred.deferred,true);assert.ok(deferred.lit>100,JSON.stringify(deferred));
+  assert.ok(deferred.differing<=deferred.lit*.002&&deferred.maximum<=24,JSON.stringify(deferred));
+  for(const sky of deferred.skies){assert.equal(sky.bad,0,JSON.stringify(sky));assert.ok(sky.mapped>=sky.escaped*.99&&sky.mapped>0,JSON.stringify(sky));}
+  const product=deferred.product;assert.equal(product.skyLit,true);assert.ok(product.skyBuilds>0&&product.refineBuilds>0,JSON.stringify(product));assert.equal(product.skyWidth,640);assert.equal(product.skyHeight,400);assert.equal(product.glError,0);assert.ok(product.productLit>100,JSON.stringify(product));
+  // Footprint widening redistributes star light without creating or losing it
+  // (display light within 15%; the tone curve is not linear in bright cores).
+  const widened=await gpu.evaluate(()=>compareDeferredSky(true));const ratio=widened.flux[1]/widened.flux[0];
+  assert.ok(widened.differing>0&&ratio>.85&&ratio<1.15,JSON.stringify({ratio,widened}));report.starFootprint={ratio,differing:widened.differing};
+  report.deferredSky=deferred;console.log('GPU PASS deferred sky',deferred.differing,deferred.maximum);
+  for(const scene of ['isolated','quasar']){
+   const turn=await gpu.evaluate(s=>compareTurn(s),scene),text=JSON.stringify(turn);
+   assert.equal(turn.reused,true,text);assert.ok(turn.reuses>0,text);if(scene==='isolated')assert.ok(turn.moved>turn.lit*.1,text);
+   assert.ok(turn.differing<=turn.lit*.005,text);
+   const product=turn.product;assert.equal(product.geodesicAfter,product.geodesicBefore,text);assert.equal(product.refineAfter,product.refineBefore,text);assert.ok(product.turnReuses>=5&&product.samples===4,text);assert.equal(product.glError,0,text);
+   report[scene+'Turn']=turn;console.log('GPU PASS turn reuse',scene,turn.differing,turn.maximum,turn.moved);
+  }
   const temporal=await gpu.evaluate(async()=>{
    await runPhysicalCase({scene:'m87',density:4096});const engine=currentEngine,first=engine.readback(),build=engine.metrics.geodesicBuilds;
    caseState.time=4;engine.draw({width:640,height:400,scale:400*.028},0);const later=engine.readback();let difference=0;
