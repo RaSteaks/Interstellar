@@ -9,7 +9,13 @@ const root=path.join(__dirname,'..'),folder=process.argv[2]||path.join(root,'dis
 const metadata=JSON.parse(fs.readFileSync(path.join(folder,'grmhd3d.json')));
 const hash=buffer=>crypto.createHash('sha256').update(buffer).digest('hex');
 const bytes=Buffer.alloc(metadata.bytes);
+// Static hosting caps single files (Cloudflare Workers assets: 25 MiB); a
+// larger chunk only fails at deploy time, so every published file is bounded.
+const ASSET_LIMIT=25*1024*1024;
+const walk=dir=>fs.readdirSync(dir,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?walk(path.join(dir,entry.name)):[path.join(dir,entry.name)]);
+for(const file of walk(path.join(root,'dist')))assert.ok(fs.statSync(file).size<ASSET_LIMIT,`${path.relative(root,file)} exceeds the 25 MiB static asset limit`);
 for(const chunk of metadata.chunks){
+ assert.equal(fs.statSync(path.join(folder,chunk.file)).size,chunk.compressedBytes,chunk.file);
  const raw=zlib.gunzipSync(fs.readFileSync(path.join(folder,chunk.file)));assert.equal(raw.byteLength,chunk.bytes);assert.equal(hash(raw),chunk.sha256);raw.copy(bytes,chunk.offset);
 }
 assert.equal(metadata.solver,'Athena++');assert.equal(metadata.axisymmetric,false);

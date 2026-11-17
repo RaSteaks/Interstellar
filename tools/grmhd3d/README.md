@@ -107,7 +107,7 @@ manifest; the browser never loops or extrapolates missing states.
 
 原始 VTK、历史、构建日志和重启文件保留在 `verification/`，不进入站点。三维打包保留所有
 方位单元，不旋转二维平均场。多个 MeshBlock 由真实坐标面拼接，缺块、重叠、布局或时间
-不一致会被拒绝。数据按最多 64 MiB 原始字节分块，每块及整体均校验 SHA-256，清单最后
+不一致会被拒绝。数据按最多 16 MiB 原始字节分块（压缩后恒小于 Cloudflare Workers 单文件 25 MiB 上限），每块及整体均校验 SHA-256，清单最后
 原子替换。对浏览器而言，暂停只冻结选定观察事件，独立原生计算由本机进程管理。
 
 ## Verification / 验证

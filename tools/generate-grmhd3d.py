@@ -283,9 +283,13 @@ def pack(run, output, source_info, minimum_time=400, max_frames=32):
     # Content-addressed bounded chunks avoid a >100 MB repository object and
     # let the decoder verify/decompress one block at a time. Old manifests keep
     # referring to immutable data while the next manifest is prepared.
+    # Static hosts cap single files (Cloudflare Workers assets: 25 MiB). With
+    # 16 MiB of raw bytes per chunk the gzip output stays below that cap even
+    # for incompressible data, whatever the compression ratio.
+    chunk_bytes = 16 * 1024 * 1024
     chunks = []
-    for number, offset in enumerate(range(0, len(raw), 64 * 1024 * 1024)):
-        block = raw[offset:offset + 64 * 1024 * 1024]
+    for number, offset in enumerate(range(0, len(raw), chunk_bytes)):
+        block = raw[offset:offset + chunk_bytes]
         digest = sha256(block)
         name = f"grmhd3d-{number:03d}-{digest[:12]}.f32.gz"
         temporary = output / (name + ".tmp")
